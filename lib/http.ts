@@ -1,6 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import { openDatabase } from "./db.ts";
-import { FlowError } from "./flow.ts";
+import { FlowError, cardView, issueCard } from "./flow.ts";
+import { cardProviderFromEnv } from "./card-provider.ts";
+import type { StripeIssuing } from "./stripe.ts";
 
 export type Body = Record<string, unknown>;
 export type IdContext = { params: Promise<{ id: string }> };
@@ -42,4 +44,19 @@ export async function withDbAsync(fn: (db: DatabaseSync) => Promise<object>): Pr
   } finally {
     db.close();
   }
+}
+
+// Provider di carte dall'ambiente. Una configurazione non valida (es. chiave non sandbox) conta come «non configurato».
+export function sandboxStripe(): StripeIssuing | null {
+  try {
+    return cardProviderFromEnv();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+// Dopo la funzione sync di conferma o decisione: se la pratica ha una carta in attesa, la genera su Stripe.
+export async function issueIfPending(db: DatabaseSync, requestId: string): Promise<void> {
+  if (cardView(db, requestId).card?.status === "pending") await issueCard(db, sandboxStripe(), requestId);
 }

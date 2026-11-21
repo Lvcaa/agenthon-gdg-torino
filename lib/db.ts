@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { EXPENSE_CATEGORIES } from "./categories.ts";
 import { seedPolicy } from "./policy.ts";
 
 export const DEMO_TRIP_ID = "T-042";
@@ -41,7 +42,19 @@ const SCHEMA = `
     name TEXT NOT NULL,
     role TEXT NOT NULL REFERENCES roles (role),
     permission TEXT NOT NULL CHECK (permission IN ('employee', 'manager', 'finance')),
-    telegram_chat_id TEXT UNIQUE
+    telegram_chat_id TEXT UNIQUE,
+    stripe_cardholder_id TEXT
+  ) STRICT;
+
+  -- Regole documentali e categorie Stripe per ogni categoria di spesa (seed da lib/categories.ts).
+  CREATE TABLE IF NOT EXISTS expense_categories (
+    code TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    stripe_categories TEXT NOT NULL DEFAULT '[]',
+    mcc TEXT NOT NULL DEFAULT '',
+    requires_invoice INTEGER NOT NULL CHECK (requires_invoice IN (0, 1)),
+    receipt_label TEXT NOT NULL,
+    invoice_note TEXT NOT NULL DEFAULT ''
   ) STRICT;
 
   -- Codici monouso per collegare una chat Telegram a un utente. Il ruolo viene sempre dal database.
@@ -106,6 +119,7 @@ const SCHEMA = `
     policy_version TEXT NOT NULL,
     clause_id TEXT NOT NULL,
     reason TEXT NOT NULL,
+    funding TEXT CHECK (funding IN ('card', 'personal')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   ) STRICT;
@@ -127,9 +141,60 @@ const SCHEMA = `
     id TEXT PRIMARY KEY,
     request_id TEXT NOT NULL UNIQUE REFERENCES requests (id),
     amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
-    outcome TEXT NOT NULL CHECK (outcome IN ('match', 'over_authorized')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('match', 'over_authorized', 'capped', 'mismatch')),
     raw_json TEXT NOT NULL,
-    verified_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    verified_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    reimbursed_cents INTEGER CHECK (reimbursed_cents >= 0)
+  ) STRICT;
+
+  -- Carta virtuale monouso, una per pratica. pending = autorizzata ma non ancora creata su Stripe.
+  CREATE TABLE IF NOT EXISTS cards (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE REFERENCES requests (id),
+    stripe_card_id TEXT UNIQUE,
+    last4 TEXT,
+    exp_month INTEGER,
+    exp_year INTEGER,
+    limit_cents INTEGER NOT NULL CHECK (limit_cents > 0),
+    allowed_categories TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'inactive', 'failed')),
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  ) STRICT;
+
+  -- Pagamenti catturati. L'id è quello Stripe: la stessa transazione registrata due volte resta una riga.
+  CREATE TABLE IF NOT EXISTS card_transactions (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES requests (id),
+    stripe_card_id TEXT NOT NULL,
+    authorization_id TEXT,
+    amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+    merchant_name TEXT NOT NULL,
+    merchant_category TEXT NOT NULL,
+    merchant_city TEXT,
+    captured_at TEXT NOT NULL,
+    raw_json TEXT NOT NULL
+  ) STRICT;
+
+  -- Scontrino (receipt) obbligatorio, fattura (invoice) in più per le categorie che la richiedono.
+  CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES requests (id),
+    kind TEXT NOT NULL CHECK (kind IN ('receipt', 'invoice')),
+    amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+    merchant TEXT,
+    doc_date TEXT,
+    vat_number TEXT,
+    invoiced_to_company INTEGER CHECK (invoiced_to_company IN (0, 1)),
+    payment_method TEXT NOT NULL DEFAULT 'unknown' CHECK (payment_method IN ('card', 'cash', 'unknown')),
+    source TEXT NOT NULL CHECK (source IN ('upload', 'synthetic')),
+    filename TEXT,
+    mime TEXT,
+    path TEXT,
+    extracted_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (request_id, kind)
   ) STRICT;
 
   -- Registro: append-only, un evento per ogni passaggio della pratica.
@@ -158,6 +223,17 @@ function seed(db: DatabaseSync) {
 
   seedPolicy(db);
 
+  const upsertCategory = db.prepare(
+    `INSERT INTO expense_categories (code, label, stripe_categories, mcc, requires_invoice, receipt_label, invoice_note)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (code) DO UPDATE SET label = excluded.label, stripe_categories = excluded.stripe_categories,
+       mcc = excluded.mcc, requires_invoice = excluded.requires_invoice, receipt_label = excluded.receipt_label,
+       invoice_note = excluded.invoice_note`,
+  );
+  for (const c of EXPENSE_CATEGORIES) {
+    upsertCategory.run(c.code, c.label, JSON.stringify(c.stripeCategories), c.mcc, c.requiresInvoice ? 1 : 0, c.receiptLabel, c.invoiceNote);
+  }
+
   const insertUser = db.prepare(
     "INSERT INTO roles_and_users (id, name, role, permission) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
   );
@@ -185,6 +261,37 @@ function migrate(db: DatabaseSync) {
   const roleColumns = columns("roles");
   for (const column of roleColumns.filter((c) => c.endsWith("_cents"))) db.exec(`ALTER TABLE roles DROP COLUMN ${column}`);
   if (!roleColumns.includes("description")) db.exec("ALTER TABLE roles ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+
+  // Carta Stripe: funding della pratica e cardholder dell'utente.
+  if (!requestColumns.includes("funding")) {
+    db.exec("ALTER TABLE requests ADD COLUMN funding TEXT CHECK (funding IN ('card', 'personal'))");
+  }
+  if (!columns("roles_and_users").includes("stripe_cardholder_id")) {
+    db.exec("ALTER TABLE roles_and_users ADD COLUMN stripe_cardholder_id TEXT");
+  }
+
+  // receipts: nuovi esiti (capped, mismatch) e rimborso. Il CHECK non si altera, quindi si ricostruisce la tabella.
+  const receiptSql = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'").get()?.sql ?? "");
+  if (receiptSql && (!receiptSql.includes("'capped'") || !columns("receipts").includes("reimbursed_cents"))) {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec(`
+      ALTER TABLE receipts RENAME TO receipts_old;
+      CREATE TABLE receipts (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE REFERENCES requests (id),
+        amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+        outcome TEXT NOT NULL CHECK (outcome IN ('match', 'over_authorized', 'capped', 'mismatch')),
+        raw_json TEXT NOT NULL,
+        verified_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        reimbursed_cents INTEGER CHECK (reimbursed_cents >= 0)
+      ) STRICT;
+      INSERT INTO receipts (id, request_id, amount_cents, outcome, raw_json, verified_at, reimbursed_cents)
+        SELECT id, request_id, amount_cents, outcome, raw_json, verified_at,
+               CASE WHEN outcome = 'match' THEN amount_cents END FROM receipts_old;
+      DROP TABLE receipts_old;
+    `);
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 export function openDatabase(filename = join(process.cwd(), ".data", "agenthon.sqlite")) {

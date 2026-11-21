@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { CategoryIcon, IconAlert, IconCheck, IconFile, IconDownload, IconReceipt, IconReset, IconTelegram, IconUpload } from "./icons";
+import { CategoryIcon, IconAlert, IconCheck, IconDownload, IconFile, IconReceipt, IconReset, IconTelegram, IconUpload } from "./icons";
 
 type Json = Record<string, unknown>;
 
@@ -30,6 +30,28 @@ export interface RequestItem {
   quote: string | null;
   policyGap: boolean;
   reason: string;
+  funding: string | null;
+  verification: string | null;
+  awaitingDocs: boolean;
+  card: CardPanelData | null;
+}
+
+export interface CardPanelData {
+  requestId: string;
+  funding: "card" | "personal";
+  last4: string | null;
+  limit: string;
+  limitCents: number;
+  category: string;
+  stateLabel: string;
+  stateReason: string | null;
+  transaction: { merchant: string; amount: string } | null;
+  docs: { kind: "receipt" | "invoice"; label: string; present: boolean }[];
+  billing: { name: string; vatNumber: string; sdiCode: string; pec: string } | null;
+  invoiceNote: string;
+  canPay: boolean;
+  canUpload: boolean;
+  popup: boolean;
 }
 
 export interface EventItem {
@@ -57,6 +79,7 @@ export type CardData =
       quote: string | null;
       policyGap: boolean;
     }
+  | ({ type: "card" } & CardPanelData)
   | { type: "requests"; items: RequestItem[] }
   | { type: "events"; items: EventItem[] }
   | { type: "telegram_code"; code: string; expiresAt: string }
@@ -124,6 +147,197 @@ function CsvButton({ requestId, actorId }: { requestId: string; actorId: string 
       </button>
       {message && <span className="error">{message}</span>}
     </span>
+  );
+}
+
+function InvoicePopup({ requestId, billing, note }: { requestId: string; billing: NonNullable<CardPanelData["billing"]>; note: string }) {
+  const key = `invoice-popup-${requestId}`;
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(key)) setOpen(true);
+    } catch {
+      setOpen(true);
+    }
+  }, [key]);
+
+  function close() {
+    try {
+      localStorage.setItem(key, "1");
+    } catch {}
+    setOpen(false);
+  }
+
+  if (!open) return null;
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby={`${key}-title`}>
+      <div className="modal">
+        <h2 id={`${key}-title`}>Ricordati la fattura</h2>
+        <p>
+          Per questa spesa chiedi la fattura intestata all&apos;azienda{note ? `. ${note}` : "."}
+        </p>
+        <dl className="billing">
+          <dt>Ragione sociale</dt>
+          <dd>{billing.name}</dd>
+          <dt>P.IVA</dt>
+          <dd>{billing.vatNumber}</dd>
+          <dt>Codice SDI</dt>
+          <dd>{billing.sdiCode}</dd>
+          <dt>PEC</dt>
+          <dd>{billing.pec}</dd>
+        </dl>
+        <p className="muted small">Se non carichi ricevuta, scontrino e fattura, la funzione carta potrebbe esserti disabilitata in futuro.</p>
+        <button className="primary" onClick={close}>
+          Ho capito
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PayForm({ data, actorId }: { data: CardPanelData; actorId: string }) {
+  const router = useRouter();
+  const [amount, setAmount] = useState((data.limitCents / 100).toFixed(2).replace(".", ","));
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function pay() {
+    const cents = Math.round(Number(amount.replace(",", ".")) * 100);
+    if (!Number.isInteger(cents) || cents <= 0) {
+      setMessage("Importo non valido");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    const { ok, data: res } = await post(`/api/requests/${data.requestId}/pay`, { actorId, amountCents: cents });
+    setBusy(false);
+    if (!ok) setMessage(String(res.error ?? "Errore"));
+    else if (res.approved === false) setMessage(`Pagamento rifiutato: ${String(res.reason ?? "")}`);
+    router.refresh();
+  }
+
+  return (
+    <div className="pay-row">
+      <label className="money">
+        <span>€</span>
+        <input className="amount-input" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy} aria-label="Importo" />
+      </label>
+      <button className="primary" disabled={busy} onClick={pay}>
+        Paga con la carta (sandbox)
+      </button>
+      {message && <span className="error">{message}</span>}
+    </div>
+  );
+}
+
+function UploadForm({ requestId, kind, label, actorId }: { requestId: string; kind: "receipt" | "invoice"; label: string; actorId: string }) {
+  const router = useRouter();
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function upload() {
+    if (!file) {
+      setMessage("Scegli un file");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    const form = new FormData();
+    form.set("actorId", actorId);
+    form.set("kind", kind);
+    form.set("file", file);
+    const res = await fetch(`/api/requests/${requestId}/documents`, { method: "POST", body: form });
+    const data = (await res.json().catch(() => ({}))) as Json;
+    setBusy(false);
+    if (!res.ok) setMessage(String(data.error ?? "Errore"));
+    else setFile(null);
+    router.refresh();
+  }
+
+  return (
+    <div className="upload-row">
+      <label className="file-pick">
+        <IconUpload size={15} />
+        <span>{file ? file.name : `Scegli ${label.toLowerCase()}`}</span>
+        <input type="file" accept="image/*,application/pdf" hidden disabled={busy} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      </label>
+      <button className="primary" disabled={busy || !file} onClick={upload}>
+        {busy ? "Lettura in corso…" : "Carica"}
+      </button>
+      {message && <div className="error">{message}</div>}
+    </div>
+  );
+}
+
+// Carta della pratica: virtuale (monouso) oppure personale con rimborso. Mostra documenti, pagamento e caricamento.
+function CardPanel({ data, actorId, permission }: { data: CardPanelData; actorId: string; permission: string }) {
+  const employee = permission === "employee";
+  const personal = data.funding === "personal";
+  return (
+    <div className="doc">
+      <div className="doc-head">
+        {personal ? (
+          <div className="title">
+            <strong>Carta personale · {data.category}</strong>
+            <span>
+              Paga con la tua carta fino a {data.limit} e carica lo scontrino: rimborso a fine mese.
+              {data.stateReason ? ` ${data.stateReason}` : ""}
+            </span>
+          </div>
+        ) : (
+          <>
+            <div className="mini-card" aria-hidden="true">
+              <span>•••• {data.last4 ?? "----"}</span>
+            </div>
+            <div className="title">
+              <strong>
+                Carta virtuale · {data.category} <span className="tag">monouso</span>
+              </strong>
+              <span>
+                Tetto {data.limit} · {data.stateLabel}
+                {data.stateReason ? `: ${data.stateReason}` : ""}
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+      {data.transaction && (
+        <dl className="ledger">
+          <div className="key">
+            <dt>Pagato a {data.transaction.merchant}</dt>
+            <dd>{data.transaction.amount}</dd>
+          </div>
+        </dl>
+      )}
+      <ul className="checklist">
+        {data.docs.map((d) => (
+          <li key={d.kind} className={d.present ? "done" : undefined}>
+            {d.present ? <IconCheck size={14} /> : <span className="dot" />} {d.label}
+          </li>
+        ))}
+      </ul>
+      {!data.billing && !personal && data.canPay && <div className="notice">Conserva lo scontrino o la ricevuta: dovrai caricarlo.</div>}
+      {data.billing && (
+        <div className="notice">
+          <span>
+            Fattura intestata a {data.billing.name} · P.IVA {data.billing.vatNumber} · SDI {data.billing.sdiCode} · PEC {data.billing.pec}
+            {data.invoiceNote && <span className="block">{data.invoiceNote}</span>}
+          </span>
+        </div>
+      )}
+      {employee && (data.canPay || data.canUpload) && (
+        <div className="doc-foot stack">
+          {data.canPay && <PayForm data={data} actorId={actorId} />}
+          {data.canUpload &&
+            data.docs
+              .filter((d) => !d.present)
+              .map((d) => <UploadForm key={d.kind} requestId={data.requestId} kind={d.kind} label={d.label} actorId={actorId} />)}
+        </div>
+      )}
+      {employee && data.popup && data.billing && <InvoicePopup requestId={data.requestId} billing={data.billing} note={data.invoiceNote} />}
+    </div>
   );
 }
 
@@ -204,6 +418,10 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
     );
   }
 
+  if (card.type === "card") {
+    return <CardPanel data={card} actorId={actorId} permission={permission} />;
+  }
+
   if (card.type === "requests") {
     return (
       <div className="cards">
@@ -227,12 +445,19 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
                 { label: "Budget residuo", value: r.budget },
                 { label: "Deroga", value: r.extra, key: true },
                 { label: "Autorizzato", value: r.authorized },
+                ...(r.funding ? [{ label: "Pagamento", value: r.funding }] : []),
+                ...(r.verification ? [{ label: "Verifica documenti", value: r.verification }] : []),
               ]}
             />
             <Clause clause={r.clause} text={r.quote} />
             {r.policyGap && (
               <div className="notice">
                 <IconAlert size={15} /> La policy non copre questo caso.
+              </div>
+            )}
+            {permission === "employee" && r.card && r.awaitingDocs && (
+              <div className="nested">
+                <CardPanel data={r.card} actorId={actorId} permission={permission} />
               </div>
             )}
             <div className="doc-foot">
@@ -244,7 +469,7 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
                     <ActionButton label={`Approva ${r.extra}`} kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${r.id}/decision`} body={{ actorId, decision: "approved" }} />
                   </>
                 )}
-                {permission === "employee" && r.status === "approved" && (
+                {permission === "employee" && r.awaitingDocs && (
                   <>
                     <ActionButton label={`Ricevuta ${r.overAuthorized}`} icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "over" }} />
                     <ActionButton label={`Ricevuta ${r.authorized}`} kind="primary" icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "exact" }} />
@@ -252,6 +477,11 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
                 )}
                 {permission === "finance" && ["pending_finance", "finance_approved", "exported"].includes(r.status) && (
                   <CsvButton requestId={r.id} actorId={actorId} />
+                )}
+                {permission === "finance" && r.verification && (
+                  <a className="btn-link" href={`/api/requests/${r.id}/ticket?actorId=${encodeURIComponent(actorId)}`} target="_blank" rel="noreferrer">
+                    <IconFile size={15} /> Ticket PDF
+                  </a>
                 )}
                 {permission === "finance" && r.status === "pending_finance" && (
                   <ActionButton label="Approva rimborso" kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${r.id}/finance`} body={{ actorId }} />
@@ -378,7 +608,7 @@ const INTRO: Record<string, { title: string; text: string }> = {
   },
 };
 
-export function Chat(props: { actorId: string; permission: string; messages: MessageData[]; placeholder: string }) {
+export function Chat(props: { actorId: string; permission: string; messages: MessageData[]; placeholder: string; pending?: CardPanelData[] }) {
   const router = useRouter();
   const [text, setText] = useState("");
   const [pending, setPending] = useState(false);
@@ -411,7 +641,18 @@ export function Chat(props: { actorId: string; permission: string; messages: Mes
   return (
     <div className="chat">
       <div className="messages" aria-live="polite">
-        {props.messages.length === 0 && (
+        {props.pending?.map((p) => (
+          <div key={p.requestId} className="msg assistant">
+            <div className="msg-body">
+              <div className="who-line">Assistente</div>
+              <div className="bubble">
+                <div className="text">Documenti da caricare per la tua pratica.</div>
+              </div>
+              <CardPanel data={p} actorId={props.actorId} permission={props.permission} />
+            </div>
+          </div>
+        ))}
+        {props.messages.length === 0 && !props.pending?.length && (
           <div className="empty">
             <h2>{INTRO[props.permission]?.title}</h2>
             <p>{INTRO[props.permission]?.text}</p>

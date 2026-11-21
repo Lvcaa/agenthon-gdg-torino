@@ -115,3 +115,60 @@ test("a telegram chat can be linked to one user only", (t) => {
   link(DEMO_USERS[0].id);
   assert.throws(() => link(DEMO_USERS[2].id));
 });
+
+test("card tables, categories and the receipts rebuild exist", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "agenthon-test-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, "old.sqlite");
+
+  {
+    // receipts con il vecchio CHECK e una riga già presente
+    const old = new DatabaseSync(filename);
+    old.exec(`
+      CREATE TABLE receipts (id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, amount_cents INTEGER NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('match', 'over_authorized')), raw_json TEXT NOT NULL,
+        verified_at TEXT NOT NULL DEFAULT '') STRICT;
+      INSERT INTO receipts (id, request_id, amount_cents, outcome, raw_json) VALUES ('a', 'r1', 4200, 'match', '{}');
+      CREATE TABLE roles_and_users (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
+        permission TEXT NOT NULL, telegram_chat_id TEXT UNIQUE) STRICT;
+    `);
+    old.close();
+  }
+
+  using db = openDatabase(filename);
+  const receipt = db.prepare("SELECT outcome, reimbursed_cents FROM receipts WHERE id = 'a'").get();
+  assert.deepEqual({ ...receipt }, { outcome: "match", reimbursed_cents: 4200 });
+  db.exec("PRAGMA foreign_keys = OFF");
+  db.prepare("INSERT INTO receipts (id, request_id, amount_cents, outcome, raw_json) VALUES ('b', 'r2', 4200, 'capped', '{}')").run();
+  assert.throws(() => db.prepare("INSERT INTO receipts (id, request_id, amount_cents, outcome, raw_json) VALUES ('c', 'r3', 1, 'x', '{}')").run());
+
+  assert.ok(db.prepare("PRAGMA table_info(requests)").all().some((c) => c.name === "funding"));
+  assert.ok(db.prepare("PRAGMA table_info(roles_and_users)").all().some((c) => c.name === "stripe_cardholder_id"));
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM expense_categories").get()?.count, 8);
+  const hotel = db.prepare("SELECT requires_invoice, stripe_categories FROM expense_categories WHERE code = 'hotel'").get();
+  assert.equal(hotel?.requires_invoice, 1);
+  assert.deepEqual(JSON.parse(String(hotel?.stripe_categories)), ["hotels_motels_and_resorts"]);
+  for (const table of ["cards", "card_transactions", "documents"]) {
+    assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count, 0, table);
+  }
+});
+
+test("one document per kind and one card per request", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "agenthon-test-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  using db = openDatabase(join(directory, "test.sqlite"));
+  db.prepare(
+    `INSERT INTO requests (id, trip_id, user_id, category, amount_cents, budget_cents, extra_cents,
+       priority, priority_rule, policy_version, clause_id, reason)
+     VALUES ('r1', ?, ?, 'taxi', 4200, 3000, 1200, 4, 'immediate', 'demo-1', 'TR-01', 'test')`,
+  ).run(DEMO_TRIP_ID, DEMO_USERS[0].id);
+  const insertDoc = () =>
+    db.prepare("INSERT INTO documents (id, request_id, kind, amount_cents, source) VALUES (?, 'r1', 'receipt', 4200, 'upload')").run(
+      Math.random().toString(),
+    );
+  insertDoc();
+  assert.throws(insertDoc);
+  const insertCard = () => db.prepare("INSERT INTO cards (id, request_id, limit_cents) VALUES (?, 'r1', 4200)").run(Math.random().toString());
+  insertCard();
+  assert.throws(insertCard);
+});
