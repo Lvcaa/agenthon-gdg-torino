@@ -131,15 +131,40 @@ export function loadPolicy(db: DatabaseSync, version: string): Policy {
   return { ...doc, chunks };
 }
 
-// La policy attiva: l'ultima caricata da Finance, oppure quella di esempio.
-export function readPolicy(db: DatabaseSync): Policy {
+// La policy attiva: l'ultima caricata da Finance, oppure quella di esempio. null se Finance l'ha rimossa.
+export function activePolicy(db: DatabaseSync): Policy | null {
   const active = db.prepare("SELECT version FROM policy_documents WHERE active = 1").get()?.version;
-  if (typeof active !== "string") throw new Error("Nessuna policy attiva");
-  return loadPolicy(db, active);
+  return typeof active === "string" ? loadPolicy(db, active) : null;
 }
 
-// Policy di esempio. Se il file cambia e non è stato caricato un PDF, si aggiorna da solo.
+export function readPolicy(db: DatabaseSync): Policy {
+  const policy = activePolicy(db);
+  if (!policy) throw new Error("Nessuna policy attiva");
+  return policy;
+}
+
+// Rimozione da parte di Finance: nessuna policy attiva finché non ne carica una nuova. Le versioni restano
+// in archivio perché le pratiche e i messaggi in chat le citano.
+export function isPolicyRemoved(db: DatabaseSync): boolean {
+  return db.prepare("SELECT value FROM app_settings WHERE key = 'policy_removed'").get()?.value === "1";
+}
+
+export function setPolicyRemoved(db: DatabaseSync, removed: boolean) {
+  if (removed) db.exec("INSERT INTO app_settings (key, value) VALUES ('policy_removed', '1') ON CONFLICT (key) DO UPDATE SET value = '1'");
+  else db.exec("DELETE FROM app_settings WHERE key = 'policy_removed'");
+}
+
+export function deactivatePolicy(db: DatabaseSync): string | null {
+  const active = db.prepare("SELECT version FROM policy_documents WHERE active = 1").get()?.version;
+  db.exec("UPDATE policy_documents SET active = 0 WHERE active = 1");
+  setPolicyRemoved(db, true);
+  return typeof active === "string" ? active : null;
+}
+
+// Policy di esempio. Se il file cambia e non è stato caricato un PDF, si aggiorna da solo. Non torna se Finance
+// ha rimosso la policy.
 export function seedPolicy(db: DatabaseSync) {
+  if (isPolicyRemoved(db)) return;
   const text = readFileSync(join(process.cwd(), "fixtures", "policy.md"), "utf8");
   const active = db.prepare("SELECT source FROM policy_documents WHERE active = 1").get()?.source;
   if (active === "pdf") return;

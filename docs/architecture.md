@@ -28,6 +28,7 @@ Ogni schermata è una conversazione separata, aggiornata ogni 3 secondi: si apro
 | GET | `/api/requests/[id]/documents/[kind]?actorId=` | Solo Finance. `kind`: `receipt`, `invoice` o `transaction`. Scontrino e fattura: l'originale caricato (percorso letto dal database e controllato dentro `data/documents`), oppure un PDF con i dati estratti se il documento è sintetico o il file manca. Transazione: PDF con i dati del provider della carta. 404 se il documento non c'è. |
 | GET | `/api/requests/[id]/ticket?actorId=` | Solo Finance, dopo la verifica dei documenti. PDF (`application/pdf`, inline) con riepilogo, ricevuta di transazione e originali. |
 | POST | `/api/stripe/webhook` | Firma `Stripe-Signature` verificata con `STRIPE_WEBHOOK_SECRET` (503 se manca, 400 se non valida). `issuing_transaction.created` registra la transazione e disattiva la carta; gli altri eventi sono ignorati con 200. Idempotente. Facoltativo: il pagamento simulato registra già la transazione. |
+| POST | `/api/policy/remove` | Solo Finance. `{actorId}`. Rimuove la policy attiva (pulsante «Rimuovi policy», con conferma). Finché non si carica un nuovo PDF l'assistente risponde senza chiamare il modello che non c'è una policy, e nessuna proposta si può confermare (409). La policy di esempio non torna da sola (`app_settings.policy_removed`); il caricamento di un PDF annulla la rimozione. Una seconda rimozione risponde `duplicate: true`. |
 | POST | `/api/policy/suggestions/[id]` | Solo Finance. `{actorId, decision}` (`accepted`, `dismissed`). Decide un suggerimento di policy; una seconda decisione risponde `duplicate: true`. Accettare registra la scelta: la policy cambia quando Finance carica il PDF aggiornato. |
 | POST | `/api/demo/reset` | Riporta lo scenario ai 30 € residui e svuota le chat. Solo demo. |
 
@@ -38,7 +39,7 @@ Il codice di collegamento Telegram si genera dalla chat («collega Telegram»).
 | File | Ruolo |
 |---|---|
 | `lib/db.ts` | Apre SQLite, crea lo schema, migra i database vecchi, inserisce T-042, posizioni e utenti demo (`DEMO_USERS`, UUID fissi). |
-| `lib/policy.ts` | Policy a pezzi: `chunkPolicy` (sezioni per titolo), `ingestPolicy`/`readPolicy` (archivio e policy attiva), `retrieve` (BM25), `policyIndex` e `excerpts` (cosa vede il modello), `findSection` (titolo e pagina di una citazione). Versione = impronta del testo. `seedPolicy` carica `fixtures/policy.md` se non c'è un PDF attivo. |
+| `lib/policy.ts` | Policy a pezzi: `chunkPolicy` (sezioni per titolo), `ingestPolicy`/`readPolicy` (archivio e policy attiva), `retrieve` (BM25), `policyIndex` e `excerpts` (cosa vede il modello), `findSection` (titolo e pagina di una citazione). Versione = impronta del testo. `seedPolicy` carica `fixtures/policy.md` se non c'è un PDF attivo e Finance non ha rimosso la policy. `activePolicy` restituisce null senza policy; `deactivatePolicy` la rimuove. |
 | `lib/pdf.ts`, `lib/policy-upload.ts` | Estrazione del testo con `unpdf` e caricamento riservato a Finance: controlla tipo, dimensione, pagine e presenza di testo, poi registra evento e messaggio in chat. |
 | `lib/proposal.ts` | `verifyProposal`: controlla la proposta dell'agente (citazione presente nella policy, limite scritto nella citazione, importi in centesimi interi). |
 | `lib/agent.ts` | `agentTurn`: prompt con policy, profilo e stato, chiamata al modello, verifica con un nuovo tentativo, scelta della scheda da mostrare. Il modello è iniettabile per i test. |
@@ -138,6 +139,7 @@ Importi sempre in centesimi. Tabelle (`STRICT`, chiavi esterne attive):
 | `card_transactions` | I pagamenti catturati (id Stripe come chiave, quindi idempotenti): importo, esercente, MCC, ora, JSON grezzo. |
 | `documents` | Scontrino e fattura di una pratica (`UNIQUE (request_id, kind)`): importo, esercente, data, P.IVA, intestazione all'azienda, ultime 4 cifre della carta (`card_last4`) e riferimento della transazione (`transaction_ref`) stampati, origine (`upload`, `synthetic`), percorso del file ed estrazione. |
 | `policy_suggestions` | Suggerimenti di policy per Finance, uno per (trasferta, categoria): numero di deroghe, extra medio, aumento proposto, finestra in giorni, stato (`open`, `accepted`, `dismissed`) e chi ha deciso. |
+| `app_settings` | Chiave/valore. `policy_removed = '1'` quando Finance ha rimosso la policy. |
 | `events` | Registro append-only collegato alla pratica e all'attore. |
 
 Stati della pratica: `draft`, `pending_manager`, `approved`, `rejected`, `in_review`, `pending_finance`, `finance_approved`, `exported`.

@@ -224,6 +224,12 @@ const SCHEMA = `
     UNIQUE (trip_id, category)
   ) STRICT;
 
+  -- Impostazioni dell'app (chiave/valore). policy_removed = '1': Finance ha rimosso la policy, niente ricarica automatica.
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  ) STRICT;
+
   -- Registro: append-only, un evento per ogni passaggio della pratica.
   CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

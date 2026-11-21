@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { addMessage, FlowError, getActor } from "./flow.ts";
 import { extractPdfPages } from "./pdf.ts";
-import { ingestPolicy, type Policy } from "./policy.ts";
+import { ingestPolicy, setPolicyRemoved, type Policy } from "./policy.ts";
 
 export const MAX_PDF_BYTES = 5 * 1024 * 1024;
 const MAX_PDF_PAGES = 100;
@@ -40,6 +40,7 @@ export async function uploadPolicyPdf(
 
   const filename = safeName(file.name);
   const policy = ingestPolicy(db, { filename, source: "pdf", pages, uploadedBy: actor.id });
+  setPolicyRemoved(db, false);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, `${policy.version}.pdf`), file.bytes);
 

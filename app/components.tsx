@@ -97,12 +97,21 @@ export interface MessageData {
   card: CardData | null;
 }
 
-export function ActionButton(props: { label: string; url: string; body: Json; kind?: "danger" | "primary" | "success"; icon?: ReactNode }) {
+export function ActionButton(props: {
+  label: string;
+  url: string;
+  body: Json;
+  kind?: "danger" | "primary" | "success";
+  icon?: ReactNode;
+  // Testo di conferma per le azioni distruttive: se l'utente annulla non parte nulla.
+  confirm?: string;
+}) {
   const router = useRouter();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function run() {
+    if (props.confirm && !window.confirm(props.confirm)) return;
     setBusy(true);
     setMessage("");
     const { ok, data } = await post(props.url, props.body);

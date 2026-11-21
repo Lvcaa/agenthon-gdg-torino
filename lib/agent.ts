@@ -13,7 +13,7 @@ import {
   type Card,
 } from "./flow.ts";
 import { generateJson } from "./gemini.ts";
-import { CATEGORIES, excerpts, policyIndex, readPolicy, retrieve, type Policy } from "./policy.ts";
+import { CATEGORIES, activePolicy, excerpts, policyIndex, retrieve, type Policy } from "./policy.ts";
 import { verifyProposal, type VerifiedProposal } from "./proposal.ts";
 
 export type Llm = (prompt: string, system: string) => Promise<unknown>;
@@ -164,7 +164,19 @@ export async function agentTurn(db: DatabaseSync, actorId: unknown, text: unknow
   const history = listMessages(db, actor.id, HISTORY_MESSAGES).map((m) => ({ role: m.role, content: m.content }));
   addMessage(db, actor.id, "user", message);
 
-  const policy = readPolicy(db);
+  const policy = activePolicy(db);
+  if (!policy) {
+    // Senza policy non si chiama il modello: non avrebbe regole da citare e il server non potrebbe verificare nulla.
+    addMessage(
+      db,
+      actor.id,
+      "assistant",
+      actor.permission === "finance"
+        ? "Non c'è nessuna policy attiva. Caricala dalla scheda Policy e da lì in poi la uso per rispondere."
+        : "Al momento non c'è una policy aziendale attiva, quindi non posso verificare limiti né preparare richieste. Finance deve caricarla: riprova dopo.",
+    );
+    return;
+  }
   let result;
   try {
     result = await askVerified(llm, db, actor, policy, history, message);

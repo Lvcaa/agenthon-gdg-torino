@@ -18,7 +18,7 @@ import {
   type RequestView,
   type Status,
 } from "../lib/flow";
-import { loadPolicy, readPolicy } from "../lib/policy";
+import { activePolicy, loadPolicy } from "../lib/policy";
 import { IconChart, IconShield, IconUser, Logo } from "./icons";
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -175,9 +175,9 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
   let users: Actor[];
   let actor: Actor;
   let messages: MessageData[];
-  let activeVersion: string;
+  let activeVersion: string | null;
   try {
-    activeVersion = readPolicy(db).version;
+    activeVersion = activePolicy(db)?.version ?? null;
     ({ users, actor } = resolveActor(db, permission, as));
 
     const rows = listMessages(db, actor.id);
@@ -289,7 +289,7 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
             <dt>Trasferta</dt>
             <dd>{DEMO_TRIP_ID}</dd>
             <dt>Policy</dt>
-            <dd>{activeVersion}</dd>
+            <dd>{activeVersion ?? "nessuna"}</dd>
           </dl>
           <ResetButton />
         </div>

@@ -13,6 +13,7 @@ import {
   createLinkCode,
   decide,
   exportCsv,
+  removePolicy,
   ticketData,
   attachDocument,
   financeApprove,
@@ -21,7 +22,7 @@ import {
   redeemLinkCode,
   resetDemo,
 } from "../lib/flow.ts";
-import { chunkPolicy, excerpts, ingestPolicy, readPolicy, retrieve } from "../lib/policy.ts";
+import { activePolicy, chunkPolicy, excerpts, ingestPolicy, readPolicy, retrieve } from "../lib/policy.ts";
 import { uploadPolicyPdf } from "../lib/policy-upload.ts";
 import { fakeStripe, settleCard } from "./helpers/fake-stripe.ts";
 import { makePdf } from "./helpers/pdf.ts";
@@ -595,4 +596,55 @@ test("a request within the budget needs no justification", async (t) => {
   const sent = confirmProposal(db, anna, message.id).request;
   assert.equal(sent.status, "approved");
   assert.equal(sent.justification, null);
+});
+
+test("Finance removes the policy: the assistant stops proposing until a new PDF is uploaded", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "agenthon-remove-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = join(directory, "test.sqlite");
+  let db = openDatabase(file);
+  t.after(() => db.close());
+
+  // una proposta preparata prima della rimozione
+  await agentTurn(db, anna, "Mi serve un taxi", answer(taxi()));
+  const before = listMessages(db, anna).filter((m) => m.card && JSON.parse(m.card).type === "proposal").at(-1)!;
+
+  expectError(403, () => removePolicy(db, anna));
+  expectError(403, () => removePolicy(db, giulia));
+  const removed = removePolicy(db, paolo);
+  assert.equal(removed.duplicate, false);
+  assert.equal(activePolicy(db), null);
+  assert.equal(removePolicy(db, paolo).duplicate, true, "una seconda rimozione non fa nulla");
+  assert.equal(count(db, "SELECT COUNT(*) AS count FROM events WHERE type = 'policy_removed'"), 1);
+
+  // senza policy il modello non viene chiamato e non nasce nessuna proposta
+  let called = 0;
+  await agentTurn(db, anna, "Posso prendere un taxi da 20 euro?", async () => {
+    called++;
+    return { reply: "x", show: "none", proposal: taxi() };
+  });
+  assert.equal(called, 0);
+  assert.match(listMessages(db, anna).at(-1)!.content, /non c'è una policy aziendale attiva/);
+  expectError(409, () => confirmProposal(db, anna, before.id, WHY));
+
+  // riaprendo il database la policy di esempio non torna da sola
+  db.close();
+  db = openDatabase(file);
+  assert.equal(activePolicy(db), null);
+
+  // Finance carica il PDF: torna attiva e l'assistente la usa di nuovo
+  const dir = join(directory, "policies");
+  const policy = await uploadPolicyPdf(db, paolo, { name: "nuova.pdf", bytes: makePdf(pdfPolicy) }, dir);
+  assert.equal(activePolicy(db)?.version, policy.version);
+  const quote = "Il budget taxi e di 25 euro per i junior e 45 euro per i senior.";
+  await agentTurn(db, anna, "Taxi da 20 euro", answer(taxi({ amountCents: 2000, limitCents: 2500, clauseQuote: quote })));
+  const card = JSON.parse(listMessages(db, anna).at(-1)!.card!);
+  assert.equal(card.type, "proposal");
+  assert.equal(card.proposal.policyVersion, policy.version);
+  assert.equal(card.proposal.limitCents, 2500);
+
+  // anche dopo una nuova apertura resta quella caricata
+  db.close();
+  db = openDatabase(file);
+  assert.equal(activePolicy(db)?.version, policy.version);
 });

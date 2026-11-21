@@ -6,7 +6,7 @@ import { CATEGORY_LABEL, buildCard, resolveActor, statusLabel } from "./chat-scr
 import { openDatabase } from "../lib/db";
 import { formatEuro } from "../lib/format";
 import type { Actor, DocumentKind, RequestView } from "../lib/flow";
-import { readPolicy } from "../lib/policy";
+import { activePolicy, type Policy } from "../lib/policy";
 import type { Urgency } from "../lib/proposal";
 import {
   employeeRequests,
@@ -629,7 +629,7 @@ function suggestionsSection(actor: Actor, suggestions: SuggestionView[]) {
 }
 
 function policyPanel(db: DatabaseSync, actor: Actor, suggestions: SuggestionView[]) {
-  const policy = readPolicy(db);
+  const policy = activePolicy(db);
   return (
     <>
       {suggestionsSection(actor, suggestions)}
@@ -638,6 +638,14 @@ function policyPanel(db: DatabaseSync, actor: Actor, suggestions: SuggestionView
         <p className="muted small">È il testo che l&apos;assistente cita in ogni risposta.</p>
       </div>
       <PolicyUpload actorId={actor.id} />
+      {policy ? activePolicyInfo(actor, policy) : <Empty title="Nessuna policy attiva" text="L'assistente non può verificare limiti né preparare richieste. Carica il PDF della policy qui sopra." />}
+    </>
+  );
+}
+
+function activePolicyInfo(actor: Actor, policy: Policy) {
+  return (
+    <>
       <div className="policy-info">
         <div>
           <strong>{policy.filename}</strong>
@@ -648,6 +656,15 @@ function policyPanel(db: DatabaseSync, actor: Actor, suggestions: SuggestionView
         <span className="tag status status-done" style={{ marginLeft: "auto" }}>
           Attiva
         </span>
+      </div>
+      <div className="item-actions">
+        <ActionButton
+          label="Rimuovi policy"
+          kind="danger"
+          url="/api/policy/remove"
+          body={{ actorId: actor.id }}
+          confirm={`Rimuovere la policy ${policy.filename}? Finché non ne carichi una nuova l'assistente non potrà preparare richieste.`}
+        />
       </div>
       <p className="muted small" style={{ margin: 0 }}>
         Controlla che le sezioni qui sotto siano quelle del documento: l&apos;assistente legge solo i pezzi pertinenti a ogni domanda.

@@ -4,7 +4,7 @@ import { COMPANY_BILLING, EXPENSE_CATEGORIES, type CategoryRule } from "./catego
 import { DEMO_TRIP_ID } from "./db.ts";
 import { normalizeRef } from "./document-extract.ts";
 import { formatEuro } from "./format.ts";
-import { readPolicy, type Category } from "./policy.ts";
+import { activePolicy, deactivatePolicy, type Category } from "./policy.ts";
 import { verifyProposal, type Urgency, type VerifiedProposal } from "./proposal.ts";
 import type { CapturedTransaction, StripeIssuing } from "./stripe.ts";
 import type { TicketData } from "./ticket-pdf.ts";
@@ -388,7 +388,8 @@ export function confirmProposal(
     if (card?.type !== "proposal") throw new FlowError(404, "Il messaggio non contiene una proposta");
     if (message.request_id) return { request: getRequest(db, message.request_id), duplicate: true };
 
-    const policy = readPolicy(db);
+    const policy = activePolicy(db);
+    if (!policy) throw new FlowError(409, "Nessuna policy attiva: aspetta che Finance la carichi");
     const check = verifyProposal(card.proposal, policy);
     if (!check.ok || card.proposal.policyVersion !== policy.version) {
       throw new FlowError(409, "La policy è cambiata dopo la proposta: chiedi di nuovo all'assistente");
@@ -1247,6 +1248,19 @@ export function exportCsv(db: DatabaseSync, actorId: unknown, requestId: unknown
     if (row.status === "finance_approved") setStatus(db, row.id, "exported");
     logEvent(db, row.id, actor.id, "csv_exported", { amountCents: data.receipt_cents });
     return { filename: `rimborso-${row.id}.csv`, csv: `${header.join(",")}\n${line.map(csvCell).join(",")}\n` };
+  });
+}
+
+// Finance rimuove la policy attiva. Finché non ne carica una nuova l'assistente non propone richieste
+// e nessuna proposta si può confermare. Le pratiche esistenti restano con la versione con cui sono nate.
+export function removePolicy(db: DatabaseSync, actorId: unknown): { version: string | null; duplicate: boolean } {
+  const actor = getActor(db, actorId, "finance");
+  return tx(db, () => {
+    const version = deactivatePolicy(db);
+    if (!version) return { version: null, duplicate: true };
+    logEvent(db, null, actor.id, "policy_removed", { version });
+    say(db, actor.id, `Policy ${version} rimossa. Finché non ne carichi una nuova l'assistente non può verificare limiti né preparare richieste.`);
+    return { version, duplicate: false };
   });
 }
 
