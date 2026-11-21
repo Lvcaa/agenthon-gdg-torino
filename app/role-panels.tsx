@@ -299,14 +299,23 @@ function policyPanel(db: DatabaseSync, actor: Actor) {
   const policy = readPolicy(db);
   return (
     <>
+      <div className="panel-head">
+        <h2>Policy aziendale</h2>
+        <p className="muted small">È il testo che l&apos;assistente cita in ogni risposta.</p>
+      </div>
       <PolicyUpload actorId={actor.id} />
       <div className="policy-info">
-        <strong>{policy.filename}</strong>
-        <div className="muted">
-          versione {policy.version} · {policy.pages} {policy.pages === 1 ? "pagina" : "pagine"} · {policy.chunks.length} sezioni
+        <div>
+          <strong>{policy.filename}</strong>
+          <div className="muted small">
+            versione {policy.version} · {policy.pages} {policy.pages === 1 ? "pagina" : "pagine"} · {policy.chunks.length} sezioni
+          </div>
         </div>
+        <span className="tag status-done" style={{ marginLeft: "auto" }}>
+          Attiva
+        </span>
       </div>
-      <p className="muted small">
+      <p className="muted small" style={{ margin: 0 }}>
         Controlla che le sezioni qui sotto siano quelle del documento: l&apos;assistente legge solo i pezzi pertinenti a ogni domanda.
       </p>
       <ol className="sections">
