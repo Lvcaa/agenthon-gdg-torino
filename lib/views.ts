@@ -133,6 +133,8 @@ export interface FinanceTicket extends RequestView {
   reimbursed_cents: number | null;
   spent_cents: number | null;
   required: DocumentKind[];
+  // Documenti che il dipendente deve ancora caricare (solo se la pratica li attende).
+  missing: DocumentKind[];
   downloads: { kind: DownloadKind; original: boolean }[];
 }
 
@@ -142,12 +144,44 @@ export function financeTickets(db: DatabaseSync, actorId: unknown, userId: unkno
   const person =
     typeof userId === "string" ? (db.prepare("SELECT id FROM roles_and_users WHERE id = ?").get(userId) as { id: string } | undefined) : undefined;
   if (!person) throw new FlowError(404, "Persona non trovata");
+  return toTickets(db, listRequests(db, { userId: person.id }));
+}
+
+// Code di Finance, per tutte le persone:
+// - review: in revisione perché la riconciliazione ha trovato un'incoerenza (o vecchie pratiche in coda Finance);
+// - auto: approvate in automatico dall'agente di verifica;
+// - waiting: il dipendente deve ancora caricare scontrino o fattura (con la carta, dopo il pagamento).
+export const FINANCE_QUEUES = ["review", "auto", "waiting"] as const;
+export type FinanceQueue = (typeof FINANCE_QUEUES)[number];
+
+export function parseFinanceQueue(value: unknown): FinanceQueue | null {
+  return FINANCE_QUEUES.includes(value as FinanceQueue) ? (value as FinanceQueue) : null;
+}
+
+export function financeQueueOf(t: FinanceTicket): FinanceQueue | null {
+  if (t.status === "in_review" || t.status === "pending_finance") return "review";
+  if (t.decisions.some((d) => d.kind === "finance" && d.channel === "agent")) return "auto";
+  if (t.missing.length > 0 && (t.funding !== "card" || t.downloads.some((d) => d.kind === "transaction"))) return "waiting";
+  return null;
+}
+
+export function financeQueues(db: DatabaseSync, actorId: unknown): Record<FinanceQueue, FinanceTicket[]> {
+  getActor(db, actorId, "finance");
+  const queues: Record<FinanceQueue, FinanceTicket[]> = { review: [], auto: [], waiting: [] };
+  for (const t of toTickets(db, listRequests(db))) {
+    const queue = financeQueueOf(t);
+    if (queue) queues[queue].push(t);
+  }
+  return queues;
+}
+
+function toTickets(db: DatabaseSync, rows: RequestView[]): FinanceTicket[] {
   const decisionsOf = db.prepare(
     `SELECT a.kind, a.decision, COALESCE(u.name, '${AGENT_NAME}') AS by, a.channel, a.decided_at AS at FROM approvals a
      LEFT JOIN roles_and_users u ON u.id = a.decided_by WHERE a.request_id = ? ORDER BY a.id`,
   );
   const receiptOf = db.prepare("SELECT outcome, reimbursed_cents, amount_cents, raw_json FROM receipts WHERE request_id = ?");
-  return listRequests(db, { userId: person.id })
+  return [...rows]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .map((r) => {
       const v = cardView(db, r.id);
@@ -170,6 +204,7 @@ export function financeTickets(db: DatabaseSync, actorId: unknown, userId: unkno
         reimbursed_cents: receipt?.reimbursed_cents ?? null,
         spent_cents: v.transaction?.amount_cents ?? receipt?.amount_cents ?? null,
         required: v.required,
+        missing: expectsDocuments(r) ? v.missing : [],
         downloads,
       };
     });

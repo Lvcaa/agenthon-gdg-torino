@@ -11,7 +11,11 @@ import type { Urgency } from "../lib/proposal";
 import {
   employeeRequests,
   financePeople,
+  financeQueues,
   financeTickets,
+  parseFinanceQueue,
+  type FinanceQueue,
+  type FinanceTicket,
   managerDecisions,
   managerQueue,
   parseUrgency,
@@ -361,7 +365,52 @@ function financePanel(db: DatabaseSync, actor: Actor, params: Params) {
   );
 }
 
+const QUEUE_CHIPS: { value: FinanceQueue | "people"; label: string }[] = [
+  { value: "review", label: "Da rivedere" },
+  { value: "auto", label: "Approvate in automatico" },
+  { value: "waiting", label: "Attendono documenti" },
+  { value: "people", label: "Per persona" },
+];
+const QUEUE_EMPTY: Record<FinanceQueue, { title: string; text: string }> = {
+  review: { title: "Niente da rivedere", text: "L'agente non ha trovato incoerenze nei documenti." },
+  auto: { title: "Nessuna approvazione automatica", text: "Qui arrivano le pratiche con scontrino, fattura e transazione coerenti." },
+  waiting: { title: "Nessun documento in attesa", text: "Nessun dipendente deve ancora caricare scontrino o fattura." },
+};
+
 function expensesPanel(db: DatabaseSync, actor: Actor, params: Params) {
+  // Senza filtro si apre «Da rivedere»: è la coda su cui Finance deve agire. La vista per persona resta raggiungibile.
+  const view: FinanceQueue | "people" = params.queue === "people" ? "people" : parseFinanceQueue(params.queue) ?? "review";
+  const queues = financeQueues(db, actor.id);
+  return (
+    <>
+      <div className="chips" role="group" aria-label="Filtra le note spese">
+        {QUEUE_CHIPS.map((c) => {
+          const n = c.value === "people" ? undefined : queues[c.value].length;
+          return (
+            <a
+              key={c.value}
+              href={href(params, { queue: c.value === "review" ? undefined : c.value, person: undefined, q: undefined })}
+              className={`${view === c.value ? "active" : ""}${n === 0 ? " empty" : ""}`}
+              aria-current={view === c.value ? "page" : undefined}
+            >
+              {c.label}
+              {n ? <span className="count">{n}</span> : null}
+            </a>
+          );
+        })}
+      </div>
+      {view === "people" ? (
+        peopleView(db, actor, params)
+      ) : queues[view].length === 0 ? (
+        <Empty {...QUEUE_EMPTY[view]} />
+      ) : (
+        ticketCards(db, actor, queues[view], true)
+      )}
+    </>
+  );
+}
+
+function peopleView(db: DatabaseSync, actor: Actor, params: Params) {
   const q = params.q ?? "";
   const people = financePeople(db, actor.id, q);
   const person = params.person ? people.find((p) => p.id === params.person) ?? financePeople(db, actor.id).find((p) => p.id === params.person) : undefined;
@@ -369,6 +418,7 @@ function expensesPanel(db: DatabaseSync, actor: Actor, params: Params) {
     <>
       <form className="search" method="get" role="search">
         {params.as && <input type="hidden" name="as" value={params.as} />}
+        <input type="hidden" name="queue" value="people" />
         <IconSearch size={16} />
         <input name="q" defaultValue={q} placeholder="Cerca un dipendente" aria-label="Cerca per nome" />
         {q && (
@@ -399,11 +449,20 @@ function expensesPanel(db: DatabaseSync, actor: Actor, params: Params) {
 
 function tickets(db: DatabaseSync, actor: Actor, personId: string, name: string) {
   const list = financeTickets(db, actor.id, personId);
-  const q = `actorId=${encodeURIComponent(actor.id)}`;
   return (
     <>
       <h3 className="section-title">Note spese di {name}</h3>
       {list.length === 0 && <Empty title="Nessuna nota spese" text="Questa persona non ha ancora pratiche." />}
+      {ticketCards(db, actor, list, false)}
+    </>
+  );
+}
+
+// Schede delle note spese. Nelle code di Finance il sottotitolo mostra anche il dipendente.
+function ticketCards(db: DatabaseSync, actor: Actor, list: FinanceTicket[], withName: boolean) {
+  const q = `actorId=${encodeURIComponent(actor.id)}`;
+  return (
+    <>
       {list.map((t) => (
         <article className="item" key={t.id}>
           <ItemHead
@@ -411,12 +470,14 @@ function tickets(db: DatabaseSync, actor: Actor, personId: string, name: string)
             title={CATEGORY_LABEL[t.category]}
             sub={
               <>
+                {withName && <>{t.employee_name} · </>}
                 <span className="mono">#{t.id.slice(0, 8)}</span> · {date(t.created_at)}
               </>
             }
           />
           <div className="item-meta">
             <span className={`tag status status-${t.status}`}>{statusLabel(db, t)}</span>
+            {missingText(t.missing) && <span className="tag status-in_review">{missingText(t.missing)}</span>}
           </div>
           <dl className="ledger">
             <div>

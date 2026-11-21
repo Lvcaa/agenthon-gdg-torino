@@ -10,7 +10,7 @@ Elenco di lavoro del prototipo, in ordine di priorità. Lo stato reale è nel co
 - Sezioni per ruolo:
   - **Dipendente, «Le mie richieste».** In corso, con l'etichetta dei documenti mancanti (scontrino, fattura o entrambi; la fattura solo se la categoria la richiede), e Completate.
   - **Manager.** Richieste in attesa con filtro per urgenza, più le sezioni Approvate e Rifiutate.
-  - **Finance, «Note spese».** Ricerca per nome. Ogni nota spese è un ticket con download separati di scontrino, transazione e fattura (quando presenti) e il Ticket PDF completo.
+  - **Finance, «Note spese».** Filtri Da rivedere, Approvate in automatico, Attendono documenti e Per persona (ricerca per nome). Ogni nota spese è un ticket con download separati di scontrino, transazione e fattura (quando presenti) e il Ticket PDF completo.
 
 ## Da fare
 

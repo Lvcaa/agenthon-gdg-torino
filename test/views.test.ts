@@ -5,11 +5,12 @@ import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { agentTurn, type Llm } from "../lib/agent.ts";
 import { DEMO_USERS, openDatabase } from "../lib/db.ts";
-import { FlowError, attachReceipt, confirmProposal, decide, financeApprove, listMessages } from "../lib/flow.ts";
+import { FlowError, attachDocument, attachReceipt, confirmProposal, decide, financeApprove, listMessages } from "../lib/flow.ts";
 import {
   documentDownload,
   employeeRequests,
   financePeople,
+  financeQueues,
   financeTickets,
   managerDecisions,
   managerQueue,
@@ -179,6 +180,37 @@ test("finance: ricerca per nome e ticket con i download", async (t) => {
   expectError(403, () => financePeople(db, anna));
   expectError(403, () => financeTickets(db, giulia, anna));
   expectError(404, () => financeTickets(db, paolo, "sconosciuto"));
+});
+
+test("finance: code da rivedere, approvate in automatico e in attesa di documenti", async (t) => {
+  const db = setup(t);
+  const stripe = fakeStripe();
+  const queueIds = () => {
+    const q = financeQueues(db, paolo);
+    return { review: ids(q.review), auto: ids(q.auto), waiting: ids(q.waiting) };
+  };
+
+  // in attesa del manager e carta non ancora usata: in nessuna coda
+  const auto = await submit(db, anna, taxi());
+  assert.deepEqual(queueIds(), { review: [], auto: [], waiting: [] });
+  decide(db, giulia, auto.id, "approved");
+  assert.deepEqual(queueIds().waiting, [], "prima del pagamento non si chiedono documenti");
+  await settleCard(db, stripe, anna, auto.id);
+  assert.deepEqual(queueIds().waiting, [auto.id]);
+  assert.deepEqual(financeQueues(db, paolo).waiting[0].missing, ["receipt"]);
+  attachReceipt(db, anna, auto.id, "exact");
+  assert.deepEqual(queueIds(), { review: [], auto: [auto.id], waiting: [] });
+
+  // scontrino diverso dalla transazione: da rivedere; approvata a mano esce dalle code
+  const review = await submit(db, marco, taxi({ limitCents: 6000 }));
+  await settleCard(db, stripe, marco, review.id);
+  attachDocument(db, marco, review.id, { kind: "receipt", amountCents: 4000, source: "upload", docDate: new Date().toISOString().slice(0, 10) });
+  assert.deepEqual(queueIds().review, [review.id]);
+  financeApprove(db, paolo, review.id);
+  assert.deepEqual(queueIds(), { review: [], auto: [auto.id], waiting: [] });
+
+  expectError(403, () => financeQueues(db, giulia));
+  expectError(403, () => financeQueues(db, anna));
 });
 
 test("safeDocumentPath accetta solo file dentro la cartella dei documenti", () => {
