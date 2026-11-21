@@ -3,6 +3,7 @@
 ## Contesto da caricare
 
 - Parti dai file coinvolti nel task. Apri [il piano](docs/piano-hackathon.md) solo per chiarire requisiti, priorità, collaudo o demo. Cerca la sezione pertinente con `rg`.
+- Leggi [l’architettura](docs/architecture.md) per endpoint, moduli e tabelle. Aggiornala nello stesso commit quando aggiungi o modifichi un endpoint, un modulo, una tabella o una variabile d’ambiente.
 - Verifica lo stato del progetto nel codice. Il piano descrive obiettivi e funzionalità previste. Tieni nel README i comandi di avvio e verifica quando esistono.
 
 ## Priorità di sviluppo
