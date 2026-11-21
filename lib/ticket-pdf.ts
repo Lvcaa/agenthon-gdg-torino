@@ -130,6 +130,56 @@ async function embedImage(doc: PDFDocument, bytes: Uint8Array, mime: string) {
   page.drawImage(img, { x: (A4[0] - w) / 2, y: A4[1] - MARGIN - h, width: w, height: h });
 }
 
+type TicketTransaction = NonNullable<TicketData["transaction"]>;
+type TicketDocument = TicketData["documents"][number];
+
+function writeTransactionPage(tw: Writer, t: TicketTransaction, card: TicketData["card"]) {
+  tw.text("Ricevuta di transazione (sandbox)", { size: 18, bold: true, gap: 6 });
+  tw.text("Questa ricevuta proviene dall'ambiente di prova del provider della carta: non ha valore fiscale.", { gap: 8 });
+  tw.kv("Transazione", t.id);
+  tw.kv("Esercente", t.merchantName);
+  tw.kv("Categoria esercente", t.merchantCategory);
+  if (t.merchantCity) tw.kv("Citta", t.merchantCity);
+  tw.kv("Importo", eur(t.amountCents));
+  tw.kv("Data e ora", t.capturedAt);
+  if (card) {
+    tw.kv("Carta", `**** ${card.last4}`);
+    tw.kv("Limite carta", eur(card.limitCents));
+    tw.kv("Categorie consentite", card.allowedCategories.join(", ") || "nessuna restrizione");
+  }
+}
+
+function writeDocumentSummary(sw: Writer, d: TicketDocument) {
+  const title = d.kind === "invoice" ? "Fattura" : "Scontrino/ricevuta";
+  sw.text(`${title}: documento sintetico o non incorporabile`, { size: 16, bold: true, gap: 6 });
+  sw.text("L'originale non è disponibile (documento sintetico, formato non supportato o file non leggibile). Dati estratti:", { gap: 6 });
+  sw.kv("Importo", eur(d.amountCents));
+  sw.kv("Esercente", d.merchant ?? "-");
+  sw.kv("Data", d.docDate ?? "-");
+  sw.kv("P.IVA esercente", d.vatNumber ?? "-");
+  sw.kv("Intestata all'azienda", d.invoicedToCompany == null ? "-" : d.invoicedToCompany ? "si" : "no");
+  sw.kv("Metodo di pagamento", d.paymentMethod ?? "-");
+  sw.kv("Origine", d.source);
+  if (d.path) sw.kv("File", d.path);
+}
+
+async function singlePagePdf(title: string, write: (w: Writer) => void): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  doc.setTitle(title);
+  const w = new Writer(doc, await doc.embedFont(StandardFonts.Helvetica), await doc.embedFont(StandardFonts.HelveticaBold));
+  write(w);
+  return doc.save();
+}
+
+// Download singoli per Finance: ricevuta di transazione e riepilogo di un documento senza file originale.
+export function buildTransactionPdf(t: TicketTransaction, card: TicketData["card"]): Promise<Uint8Array> {
+  return singlePagePdf(`Transazione ${t.id}`, (w) => writeTransactionPage(w, t, card));
+}
+
+export function buildDocumentSummaryPdf(d: TicketDocument): Promise<Uint8Array> {
+  return singlePagePdf(d.kind === "invoice" ? "Fattura" : "Scontrino", (w) => writeDocumentSummary(w, d));
+}
+
 export async function buildTicketPdf(data: TicketData, readFile: ReadFile = fsReadFile): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   doc.setTitle(`Ticket di spesa ${data.request.id}`);
@@ -181,26 +231,9 @@ export async function buildTicketPdf(data: TicketData, readFile: ReadFile = fsRe
   } else w.text("Verifica non ancora eseguita.", { indent: 8 });
   if (data.card) w.kv("Carta", `**** ${data.card.last4}, limite ${eur(data.card.limitCents)}`);
 
-  if (data.transaction) {
-    const t = data.transaction;
-    const tw = new Writer(doc, font, bold);
-    tw.text("Ricevuta di transazione Stripe (sandbox)", { size: 18, bold: true, gap: 6 });
-    tw.text("Questa ricevuta proviene dall'ambiente di prova Stripe: non ha valore fiscale.", { gap: 8 });
-    tw.kv("Transazione", t.id);
-    tw.kv("Esercente", t.merchantName);
-    tw.kv("Categoria esercente", t.merchantCategory);
-    if (t.merchantCity) tw.kv("Citta", t.merchantCity);
-    tw.kv("Importo", eur(t.amountCents));
-    tw.kv("Data e ora", t.capturedAt);
-    if (data.card) {
-      tw.kv("Carta", `**** ${data.card.last4}`);
-      tw.kv("Limite carta", eur(data.card.limitCents));
-      tw.kv("Categorie consentite", data.card.allowedCategories.join(", ") || "nessuna restrizione");
-    }
-  }
+  if (data.transaction) writeTransactionPage(new Writer(doc, font, bold), data.transaction, data.card);
 
   for (const d of data.documents) {
-    const title = d.kind === "invoice" ? "Fattura" : "Scontrino/ricevuta";
     let embedded = false;
     if (d.source === "upload" && d.path && (d.mime === "application/pdf" || d.mime === "image/jpeg" || d.mime === "image/png")) {
       try {
@@ -215,19 +248,7 @@ export async function buildTicketPdf(data: TicketData, readFile: ReadFile = fsRe
         embedded = false;
       }
     }
-    if (!embedded) {
-      const sw = new Writer(doc, font, bold);
-      sw.text(`${title}: documento sintetico o non incorporabile`, { size: 16, bold: true, gap: 6 });
-      sw.text("L'originale non è incorporato in questo PDF (documento sintetico, formato non supportato o file non leggibile). Dati estratti:", { gap: 6 });
-      sw.kv("Importo", eur(d.amountCents));
-      sw.kv("Esercente", d.merchant ?? "-");
-      sw.kv("Data", d.docDate ?? "-");
-      sw.kv("P.IVA esercente", d.vatNumber ?? "-");
-      sw.kv("Intestata all'azienda", d.invoicedToCompany == null ? "-" : d.invoicedToCompany ? "si" : "no");
-      sw.kv("Metodo di pagamento", d.paymentMethod ?? "-");
-      sw.kv("Origine", d.source);
-      if (d.path) sw.kv("File", d.path);
-    }
+    if (!embedded) writeDocumentSummary(new Writer(doc, font, bold), d);
   }
 
   return doc.save();

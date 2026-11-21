@@ -92,7 +92,7 @@ export interface MessageData {
   card: CardData | null;
 }
 
-function ActionButton(props: { label: string; url: string; body: Json; kind?: "danger" }) {
+export function ActionButton(props: { label: string; url: string; body: Json; kind?: "danger" }) {
   const router = useRouter();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -259,7 +259,7 @@ function UploadForm({ requestId, kind, label, actorId }: { requestId: string; ki
   );
 }
 
-function CardPanel({ data, actorId, permission }: { data: CardPanelData; actorId: string; permission: string }) {
+export function CardPanel({ data, actorId, permission }: { data: CardPanelData; actorId: string; permission: string }) {
   const employee = permission === "employee";
   const personal = data.funding === "personal";
   return (
@@ -435,7 +435,7 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
   );
 }
 
-export function Chat(props: { actorId: string; permission: string; messages: MessageData[]; placeholder: string; pending?: CardPanelData[] }) {
+export function Chat(props: { actorId: string; permission: string; messages: MessageData[]; placeholder: string }) {
   const router = useRouter();
   const [text, setText] = useState("");
   const [pending, setPending] = useState(false);
@@ -468,12 +468,6 @@ export function Chat(props: { actorId: string; permission: string; messages: Mes
   return (
     <div className="chat">
       <div className="messages">
-        {props.pending?.map((p) => (
-          <div key={p.requestId} className="bubble assistant">
-            <div className="text">Documenti da caricare per la tua pratica.</div>
-            <CardPanel data={p} actorId={props.actorId} permission={props.permission} />
-          </div>
-        ))}
         {props.messages.length === 0 && <p className="muted">{props.placeholder}</p>}
         {props.messages.map((m) => (
           <div key={m.id} className={`bubble ${m.role}`}>

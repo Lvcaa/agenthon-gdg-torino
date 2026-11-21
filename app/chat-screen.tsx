@@ -34,7 +34,7 @@ const OUTCOME_LABEL: Record<string, string> = {
   capped: "rimborso limitato al residuo",
   mismatch: "non corrisponde alla transazione",
 };
-const CATEGORY_LABEL: Record<string, string> = { taxi: "Taxi", train: "Treno", meals: "Cibo", hotel: "Hotel", other: "Altro" };
+export const CATEGORY_LABEL: Record<string, string> = { taxi: "Taxi", train: "Treno", meals: "Cibo", hotel: "Hotel", other: "Altro" };
 const TITLE: Record<Permission, string> = { employee: "Dipendente", manager: "Manager", finance: "Finance" };
 const SCREENS: { permission: Permission; href: string }[] = [
   { permission: "employee", href: "/employee" },
@@ -50,7 +50,7 @@ const PLACEHOLDER: Record<string, string> = {
 const KIND_LABEL = { receipt: "Scontrino/ricevuta", invoice: "Fattura intestata all'azienda" } as const;
 
 // Stato della pratica per la UI, derivato dalla carta (cardView).
-function statusLabel(db: DatabaseSync, r: RequestRow): string {
+export function statusLabel(db: DatabaseSync, r: RequestRow): string {
   if (r.funding === "card" && r.status === "approved") {
     const v = cardView(db, r.id);
     if (v.transaction) return "Pagata, attende i documenti";
@@ -70,7 +70,7 @@ function awaitingDocs(db: DatabaseSync, r: RequestRow): boolean {
   return r.funding !== "card" || cardView(db, r.id).transaction !== null;
 }
 
-function buildCard(db: DatabaseSync, requestId: string): CardPanelData {
+export function buildCard(db: DatabaseSync, requestId: string): CardPanelData {
   const v = cardView(db, requestId);
   const r = v.request;
   const personal = r.funding === "personal" || v.card?.status === "failed";
@@ -129,7 +129,15 @@ function toItem(db: DatabaseSync, r: RequestView): RequestItem {
   };
 }
 
-const time = (iso: string) => new Date(iso).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+export const time = (iso: string) => new Date(iso).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+
+// L'utente della schermata: quello scelto con ?as= se ha il ruolo giusto, altrimenti il primo.
+export function resolveActor(db: DatabaseSync, permission: Permission, as?: string): { users: Actor[]; actor: Actor } {
+  const users = db
+    .prepare("SELECT id, name, role, permission FROM roles_and_users WHERE permission = ? ORDER BY name")
+    .all(permission) as unknown as Actor[];
+  return { users, actor: users.find((u) => u.id === as) ?? users[0] };
+}
 
 // Una schermata per ruolo: la stessa chat, con l'utente scelto tra quelli del ruolo.
 export async function ChatScreen({ permission, as, aside }: { permission: Permission; as?: string; aside?: ReactNode }) {
@@ -137,14 +145,10 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
   let users: Actor[];
   let actor: Actor;
   let messages: MessageData[];
-  let pending: CardPanelData[] = [];
   let activeVersion: string;
   try {
     activeVersion = readPolicy(db).version;
-    users = db
-      .prepare("SELECT id, name, role, permission FROM roles_and_users WHERE permission = ? ORDER BY name")
-      .all(permission) as unknown as Actor[];
-    actor = users.find((u) => u.id === as) ?? users[0];
+    ({ users, actor } = resolveActor(db, permission, as));
 
     messages = listMessages(db, actor.id).map((m) => {
       const card = m.card ? (JSON.parse(m.card) as Card) : null;
@@ -197,12 +201,6 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
       }
       return { id: m.id, role: m.role, content: m.content, time: time(m.created_at), card: data };
     });
-    // Percorso con carta personale: il modulo di caricamento resta in cima alla chat finché mancano i documenti.
-    if (permission === "employee") {
-      pending = listRequests(db, { userId: actor.id })
-        .filter((r) => r.funding === "personal" && awaitingDocs(db, r))
-        .map((r) => buildCard(db, r.id));
-    }
   } finally {
     db.close();
   }
@@ -234,10 +232,10 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
       {aside ? (
         <div className="columns">
           <div>{aside}</div>
-          <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} pending={pending} />
+          <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} />
         </div>
       ) : (
-        <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} pending={pending} />
+        <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} />
       )}
     </main>
   );

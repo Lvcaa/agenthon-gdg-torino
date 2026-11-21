@@ -16,7 +16,7 @@ npm run dev
 
 Apri <http://127.0.0.1:3000>. Per verificare la base esegui `npm test`, `npm run typecheck` e `npm run build`.
 
-La pagina iniziale ha i link alle tre schermate. Aprile in tre finestre: **Dipendente** (chat), **Manager** (chat con le richieste) e **Finance** (caricamento della policy in PDF più chat con coda e CSV). Serve `GEMINI_GDG_KEY` in `.env.local`. Finché Finance non carica un PDF (testo selezionabile, niente scansioni) vale la policy di esempio in [fixtures/policy.md](fixtures/policy.md). Il pulsante **Reset demo** riporta lo scenario ai 30 € residui. Dettagli in [architettura](docs/architecture.md) e [schema DB](docs/schema-db.md).
+La pagina iniziale ha i link alle tre schermate. Aprile in tre finestre: **Dipendente** (chat), **Manager** (chat con le richieste) e **Finance** (caricamento della policy in PDF più chat con coda e CSV). Serve `GEMINI_GDG_KEY` in `.env.local`. Finché Finance non carica un PDF (testo selezionabile, niente scansioni) vale la policy di esempio in [fixtures/policy.md](fixtures/policy.md). A sinistra della chat ogni ruolo ha la sua sezione: il dipendente **Le mie richieste** (in corso con i documenti mancanti, completate), il manager le richieste **in attesa** (filtro per urgenza), **approvate** e **rifiutate**, Finance le **Note spese** con ricerca per persona e download di scontrino, transazione e fattura. Cosa manca è in [TODO.md](TODO.md). Il pulsante **Reset demo** riporta lo scenario ai 30 € residui. Dettagli in [architettura](docs/architecture.md) e [schema DB](docs/schema-db.md).
 
 ## Carta virtuale (sandbox)
 

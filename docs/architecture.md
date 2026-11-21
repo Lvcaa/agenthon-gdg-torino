@@ -11,11 +11,11 @@ Next.js (App Router), TypeScript, SQLite (`node:sqlite`, file `.data/agenthon.sq
 | Metodo | Percorso | Scopo |
 |---|---|---|
 | GET | `/` | Pagina iniziale con i link alle tre schermate. |
-| GET | `/employee` | Chat del dipendente. `?as=<uuid>` sceglie tra i dipendenti (Anna, Marco). |
-| GET | `/manager` | Chat del manager, con le richieste da approvare. |
-| GET | `/finance` | A sinistra la policy attiva (sezioni trovate) e il caricamento del PDF, a destra la chat di Finance con coda, rimborso e CSV. |
+| GET | `/employee` | A sinistra «Le mie richieste» (`?tab=done` per le completate), a destra la chat. `?as=<uuid>` sceglie tra i dipendenti (Anna, Marco). |
+| GET | `/manager` | A sinistra le richieste: in attesa (filtro `?urgency=immediate\|day\|week\|later`), approvate (`?view=approved`) e rifiutate (`?view=rejected`). A destra la chat. |
+| GET | `/finance` | A sinistra «Note spese» (ricerca `?q=`, persona `?person=<uuid>`, ticket con i download) oppure la policy (`?panel=policy`: sezioni trovate e caricamento del PDF). A destra la chat di Finance con coda, rimborso e CSV. |
 
-Ogni schermata è una conversazione separata, aggiornata ogni 3 secondi: si aprono in tre finestre affiancate.
+Ogni schermata è una conversazione separata, aggiornata ogni 3 secondi: si aprono in tre finestre affiancate. Il pannello a sinistra si aggiorna con la chat.
 | POST | `/api/chat` | `{actorId, message}`. Un turno con l'agente: il modello risponde, il server verifica l'eventuale proposta e salva i messaggi. Non crea pratiche. |
 | POST | `/api/policy` | Solo Finance. `multipart/form-data` con `actorId` e `file` (PDF, massimo 5 MB e 100 pagine, testo selezionabile). Estrae il testo, lo divide in sezioni, lo rende la policy attiva e salva l'originale in `.data/policies/<versione>.pdf`. |
 | POST | `/api/chat/confirm` | `{actorId, messageId}`. Il dipendente conferma la proposta: il server la rilegge dalla chat, la riverifica sulla policy e crea la pratica. Se nasce autorizzata, genera la carta virtuale. |
@@ -25,6 +25,7 @@ Ogni schermata è una conversazione separata, aggiornata ogni 3 secondi: si apro
 | GET | `/api/requests/[id]/csv?actorId=` | CSV della pratica. Bloccato (409) finché Finance non ha approvato. |
 | POST | `/api/requests/[id]/pay` | Solo sandbox. `{actorId, amountCents?}` (intero positivo, default = autorizzato). Il proprietario simula il pagamento con la carta virtuale attiva. Stripe lo rifiuta se supera il tetto. |
 | POST | `/api/requests/[id]/documents` | `multipart/form-data` con `actorId`, `kind` (`receipt`, `invoice`) e `file` (PDF, JPG, PNG, WebP, massimo 10 MB). Permessi e stato si controllano prima di chiamare il modello (`assertCanAttach`). Il modello legge il documento, il server calcola l'importo (422 se illeggibile o se il tipo contraddice `kind`) e salva il file in `.data/documents/<pratica>/<kind>.<ext>`. |
+| GET | `/api/requests/[id]/documents/[kind]?actorId=` | Solo Finance. `kind`: `receipt`, `invoice` o `transaction`. Scontrino e fattura: l'originale caricato (percorso letto dal database e controllato dentro `.data/documents`), oppure un PDF con i dati estratti se il documento è sintetico o il file manca. Transazione: PDF con i dati del provider della carta. 404 se il documento non c'è. |
 | GET | `/api/requests/[id]/ticket?actorId=` | Solo Finance, dopo la verifica dei documenti. PDF (`application/pdf`, inline) con riepilogo, ricevuta di transazione e originali. |
 | POST | `/api/stripe/webhook` | Firma `Stripe-Signature` verificata con `STRIPE_WEBHOOK_SECRET` (503 se manca, 400 se non valida). `issuing_transaction.created` registra la transazione e disattiva la carta; gli altri eventi sono ignorati con 200. Idempotente. Facoltativo: il pagamento simulato registra già la transazione. |
 | POST | `/api/demo/reset` | Riporta lo scenario ai 30 € residui e svuota le chat. Solo demo. |
@@ -47,10 +48,12 @@ Il codice di collegamento Telegram si genera dalla chat («collega Telegram»).
 | `lib/stripe.ts` | Client REST di Stripe Issuing (niente SDK): `stripeFromEnv` (null senza chiave, errore se non `sk_test_`), titolare e carta virtuale (idempotency key `card-<pratica>`), disattivazione, pagamento di prova (Test Helpers), `verifyWebhook` (HMAC con tolleranza) e `transactionFromStripe`. |
 | `lib/categories.ts` | Categorie di spesa (categorie Stripe, MCC, fattura richiesta, etichetta della ricevuta) e dati di fatturazione aziendali sintetici `COMPANY_BILLING`. |
 | `lib/document-extract.ts` | `extractDocument`: Gemini legge scontrino o fattura (immagine o PDF) e restituisce testo dell'importo, esercente, data, P.IVA venditore e acquirente. `toCents` converte l'importo in centesimi e rifiuta i valori ambigui, `isCompanyVat` confronta l'acquirente con l'azienda. |
-| `lib/ticket-pdf.ts` | `buildTicketPdf` (pdf-lib): ticket per Finance con riepilogo, ricevuta di transazione e originali accodati. |
+| `lib/ticket-pdf.ts` | `buildTicketPdf` (pdf-lib): ticket per Finance con riepilogo, ricevuta di transazione e originali accodati. `buildTransactionPdf` e `buildDocumentSummaryPdf` per i download singoli. |
+| `lib/views.ts` | Letture delle sezioni per ruolo, ognuna con il controllo del permesso: `employeeRequests` (in corso o completate, documenti mancanti), `managerQueue` (filtro per urgenza, senza le proprie richieste), `managerDecisions`, `financePeople` (ricerca per nome), `financeTickets`, `documentDownload` e `safeDocumentPath`. |
 | `lib/gemini.ts` | `generateJson(prompt, system)`: chiamata a Gemini con risposta JSON, temperatura 0.2 e retry su 503 e 429. |
 | `lib/http.ts`, `lib/format.ts` | Helper dei route handler e formattazione degli importi. |
 | `app/chat-screen.tsx`, `app/components.tsx` | Schermata a chat condivisa (server: messaggi e schede dal database) e componenti client: input, pulsanti, caricamento del PDF. Le pagine `employee`, `manager`, `finance` e la pagina iniziale la usano. |
+| `app/role-panels.tsx` | Pannelli a sinistra della chat per ruolo (`EmployeePanel`, `ManagerPanel`, `FinancePanel`). Ognuno apre e chiude il database da sé e chiama subito le parti che lo usano. |
 | `fixtures/policy.md` | Policy di esempio, usata finché Finance non carica un PDF. Ha una lacuna voluta (pasti dei livelli superiori) e una regola aperta (altre spese). |
 
 ## Come decide l'agente
@@ -94,7 +97,9 @@ Regole applicate in `lib/flow.ts`:
 - **Quando nasce la carta:** solo con la pratica autorizzata (entro il residuo o approvata dal manager). Il server crea la riga `cards` in `pending` nella transazione, poi la route chiama `issueCard` dopo il commit. Il tetto (`all_time`) è l'autorizzato esatto, le categorie ammesse vengono dalla categoria di spesa, la carta è monouso: dopo il primo pagamento catturato è disattivata. Il limite lo applica Stripe, non c'è autorizzazione in tempo reale. Doppi clic o webhook più risposta API non duplicano carte né transazioni.
 - **Deroga rifiutata:** niente Stripe. Con residuo maggiore di zero il dipendente paga con la propria carta fino al residuo, carica i documenti e riceve il rimborso a fine mese di `min(scontrino, residuo)`; l'eccedenza resta a suo carico (esito `capped`). Con residuo zero non c'è rimborso. Stesso percorso (`funding = personal`) se Stripe non è configurato o fallisce, e se il dipendente ha una pratica pagata con carta da oltre 7 giorni (`DOCUMENT_DEADLINE_DAYS`) senza documenti completi.
 - **Documenti:** lo scontrino o la ricevuta è obbligatorio per ogni pratica, la fattura intestata all'azienda solo per le categorie con `requires_invoice`. Con la carta si caricano dopo il pagamento. Con tutti i documenti il server scrive la verifica: scontrino uguale alla transazione e non oltre l'autorizzato è `match` (in coda Finance), altrimenti `mismatch` o `over_authorized` (in revisione); fattura non intestata all'azienda manda in revisione.
-- **UI:** il messaggio con la carta mostra ultime 4 cifre, tetto, categoria, stato, documenti richiesti e dati di fatturazione. Il popup «Ricordati la fattura» compare solo per le categorie con fattura. Il pulsante «Paga con la carta (sandbox)» e i pulsanti sintetici «Ricevuta» (scorciatoia demo) convivono con il caricamento reale. Finance vede funding ed esito e apre il Ticket PDF.
+- **Le mie richieste:** in corso è tutto ciò che non è chiuso, con l'etichetta dei documenti mancanti (scontrino, fattura o entrambi; la fattura solo se la categoria la richiede). Completate: `finance_approved`, `exported` e i rifiuti senza rimborso. Un rifiuto con residuo resta in corso finché non arriva lo scontrino. I moduli di caricamento stanno nella sezione, non più in cima alla chat.
+- **Decisioni del manager:** le sezioni Approvate e Rifiutate leggono `approvals` (`kind = 'manager'`): le pratiche approvate in automatico non compaiono. Non c'è un concetto di team: ogni manager vede le richieste di tutti.
+- **UI:** il messaggio con la carta mostra ultime 4 cifre, tetto, categoria, stato, documenti richiesti e dati di fatturazione. Il popup «Ricordati la fattura» compare solo per le categorie con fattura. Il pulsante «Paga con la carta (sandbox)» e i pulsanti sintetici «Ricevuta» (scorciatoia demo) convivono con il caricamento reale. Finance vede funding ed esito e apre il Ticket PDF; dalla sezione Note spese scarica anche scontrino, transazione e fattura separati.
 
 ## Bot Telegram
 

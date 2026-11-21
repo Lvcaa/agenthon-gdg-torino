@@ -55,3 +55,18 @@ a.card.link:hover { border-color: #2563eb; }
 input.amount { width: 6em; padding: 4px 6px; font: inherit; border-radius: 6px; border: 1px solid #8886; }
 .upload-row { margin-top: 6px; font-size: 0.85rem; }
 .upload-row .error { padding: 0; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.tabs a { padding: 3px 9px; border: 1px solid #8886; border-radius: 999px; text-decoration: none; color: inherit; font-size: 0.85rem; }
+.tabs.small a { font-size: 0.75rem; padding: 2px 8px; }
+.tabs a.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+.tag.warn { display: inline-block; margin: 4px 0; background: #ea580c; color: #fff; }
+.panel h3 { margin: 12px 0 6px; font-size: 0.95rem; }
+.panel > .card { margin: 0 0 8px; }
+.search { display: flex; gap: 6px; margin-bottom: 8px; }
+.search input { flex: 1; min-width: 0; padding: 5px 8px; font: inherit; border-radius: 6px; border: 1px solid #8886; }
+.people { display: flex; flex-direction: column; gap: 4px; }
+.people a { padding: 5px 8px; border: 1px solid #8884; border-radius: 6px; text-decoration: none; color: inherit; font-size: 0.9rem; }
+.people a.active { border-color: #2563eb; background: #2563eb22; }
+.downloads { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.downloads a { padding: 3px 9px; border: 1px solid #2563eb; border-radius: 6px; text-decoration: none; color: #2563eb; font-size: 0.8rem; }
