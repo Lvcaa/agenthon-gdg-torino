@@ -1,7 +1,0 @@
-{
-  "version": "demo-1",
-  "taxi": {
-    "id": "TR-01",
-    "text": "Il taxi è ammesso in trasferta. Se la spesa supera il budget residuo, il manager deve approvare una deroga."
-  }
-}

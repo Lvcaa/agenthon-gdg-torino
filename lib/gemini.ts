@@ -14,7 +14,7 @@ export async function generateJson(prompt: string, system?: string): Promise<unk
     body: JSON.stringify({
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json" },
+      generationConfig: { responseMimeType: "application/json", temperature: 0.2 },
     }),
   };
 

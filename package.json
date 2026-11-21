@@ -11,12 +11,14 @@
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "policy:pdf": "node scripts/make-policy-pdf.ts"
   },
   "dependencies": {
     "next": "^16.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "unpdf": "^2.2.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

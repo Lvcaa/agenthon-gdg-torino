@@ -29,8 +29,8 @@ Per misurare il valore, eseguite lo stesso caso sintetico una volta a mano e una
 
 | Passaggio | Cosa fa l’agente | Decisione o esito |
 |---|---|---|
-| **1. Domanda** | Interpreta una domanda sul taxi. Il backend verifica la policy vigente e legge il budget della trasferta. Se manca l’importo, l’assistente lo chiede. | Il dipendente vede che il taxi è ammesso, ma con **30 €** residui su **42 €** di spesa stimata serve una deroga di **12 €**. |
-| **2. Richiesta** | Prepara il ticket con importo, motivazione e riferimento alla policy. | Il dipendente conferma l’invio. La richiesta compare nella coda del manager. |
+| **1. Domanda** | L’agente legge la policy in testo libero e interpreta una domanda sul taxi. Trova il limite del profilo con la citazione della clausola e tiene conto di quanto è già autorizzato. Se manca l’importo, lo chiede. Il server verifica la citazione. | Il dipendente vede che il taxi è ammesso, ma con **30 €** residui su **42 €** di spesa stimata serve una deroga di **12 €**. |
+| **2. Richiesta** | Prepara il ticket con importo, motivazione, riferimento alla policy e **etichetta di priorità**. | Il dipendente conferma l’invio. La richiesta compare nella coda del manager, ordinata per priorità. |
 | **3. Deroga** | Mostra la richiesta e registra la decisione. | Il manager approva il taxi fino a **42 €** oppure rifiuta la deroga. Una pratica rifiutata esce dalla coda operativa di Finance. |
 | **4. Ricevuta** | All’arrivo del file sintetico, collega la ricevuta alla pratica e verifica l’importo. | A **42 €** la pratica passa automaticamente a Finance. A **48 €** resta in revisione. |
 | **5. Rimborso** | Aggiorna la tabella Finance e prepara i dati contabili. | Finance approva il rimborso. Il backend abilita il download della riga CSV. |
@@ -39,8 +39,29 @@ Per misurare il valore, eseguite lo stesso caso sintetico una volta a mano e una
 ### Funzioni incrementali
 
 - **Telefono simulato.** La pagina `/phone` si apre in una seconda finestra del PC con la sessione manager. Controlla la coda ogni due secondi. Dopo l’invio del dipendente compare «Deroga taxi · +12 €» e un clic apre la richiesta effettiva.
+- **Bot Telegram per il manager.** Il manager riceve il ticket su Telegram con importo, regola, priorità e due pulsanti, **Approva** e **Rifiuta**. Il bot è un secondo canale verso la stessa pratica: la pagina `/phone` resta come riserva se Telegram non risponde. Il collegamento usa un codice monouso con scadenza, generato nella web app dall’utente già autenticato: il bot associa la chat a quell’utente e legge ruolo e budget dal database. L’utente non dichiara mai il proprio ruolo su Telegram. Dopo il collegamento il bot risponde in base al profilo, ad esempio con il budget residuo del dipendente. Il bot interroga Telegram a intervalli regolari (long polling), così la demo locale non richiede un URL pubblico. Ogni pulsante chiama lo stesso endpoint di decisione dell’interfaccia web: il server verifica che la chat appartenga a un manager, che il ticket sia in attesa e che la decisione sia unica. Il registro indica il canale usato, web o Telegram. Il bot invia solo dati sintetici. Le impostazioni sono in [telegram.md](telegram.md).
 - **Storico delle deroghe.** Il backend conta le decisioni sintetiche per tipo di spesa, fascia dell’extra e versione della policy. La chat mostra «4 richieste simili su 5 approvate». Con meno di cinque casi mostra «Storico insufficiente». Il dato è una frequenza osservata e la soglia è una scelta del prototipo.
+- **Profili per seniority.** L’account sintetico porta con sé la posizione (junior, senior, lead, director). La policy è testo libero e scrive i limiti per posizione in linguaggio naturale. L’agente trova nel testo il limite che vale per chi scrive, quindi la stessa spesa da 42 € ha esiti diversi per profili diversi. Il caso base resta il junior con **30 €** residui.
+- **Mappa delle spese di trasferta.** La policy copre taxi, treno, cibo, hotel e altre spese. Il dipendente descrive una spesa o la trasferta e l’agente ricava le regole dal testo. Dove la policy non dice abbastanza, per esempio i pasti dei livelli superiori o i parcheggi, l’agente non inventa un limite: segnala che la policy non è chiara e la decisione passa al manager.
+- **Carta virtuale simulata.** Dopo l’approvazione, o subito se la spesa rientra nel budget del profilo, il backend genera una carta virtuale fittizia legata alla pratica. Il plafond coincide con l’importo autorizzato (42 € nel caso base), la carta vale per una sola spesa e per la categoria della pratica, e il dipendente non anticipa denaro. La ricevuta riconcilia la spesa con il plafond: a 42 € la pratica passa a Finance, a 48 € resta in revisione. Il CSV diventa una riga di chiusura contabile. Nessun circuito reale e nessun pagamento: il numero della carta è sintetico e il plafond è un campo del database.
 - **Ricevuta sopra il tetto autorizzato.** La variante da 48 € aggiunge una richiesta integrativa di **6 €** rispetto ai 42 € già autorizzati. Il dipendente conferma l’invio e il manager decide sulla differenza prima del passaggio a Finance. Nel prototipo base la pratica resta semplicemente in revisione.
+
+### Priorità del ticket
+
+Ogni ticket in arrivo al manager porta un’etichetta con quattro livelli, dal più basso al più urgente.
+
+| Livello | Etichetta | Quando si applica |
+|---|---|---|
+| **1** | Bassa | La spesa è prevista tra più di sette giorni. |
+| **2** | Normale | La spesa è prevista entro sette giorni. |
+| **3** | Alta | La spesa è prevista entro 24 ore. |
+| **4** | Urgente | Il dipendente deve spendere subito e aspetta la risposta, come nel caso del taxi davanti alla stazione. |
+
+- Il livello nasce dal momento in cui serve la risposta, che il modello estrae dalla domanda. Se il momento manca, l’assistente lo chiede e il modulo di riserva offre i quattro valori.
+- Un extra sopra una soglia (10 €, scelta del prototipo e fissata nel codice) alza il ticket di un livello. Il tetto resta **Urgente**.
+- Il server assegna la priorità e salva il valore e la regola applicata. Il manager non la modifica, e il dipendente non la imposta a mano, per evitare che ogni richiesta risulti urgente.
+- La coda del manager si ordina dal livello più alto, poi per ora di invio. La pagina `/phone` mostra l’etichetta nella notifica. Il registro conserva la priorità assegnata.
+- Nel caso base il taxi da 42 € è **Urgente**, con 12 € di extra.
 
 ## Stack e confini del prototipo
 
@@ -48,13 +69,31 @@ Per misurare il valore, eseguite lo stesso caso sintetico una volta a mano e una
 |---|---|
 | **Web app e API** | Next.js + TypeScript. Riutilizzare uno starter funzionante se già disponibile. |
 | **Persistenza** | SQLite locale per pratica, approvazioni, storico ed eventi. Dati sintetici precaricati per ripristinare lo scenario tra le prove. |
-| **Policy** | JSON versionato con una clausola sulla spesa taxi. Il server legge direttamente la policy. Per una sola clausola il contesto diretto basta. |
-| **Modello** | Una chiamata con output strutturato per classificare la spesa ed estrarre l’importo. Il modulo iniziale resta disponibile se il modello non risponde. |
-| **Controlli** | Il backend usa importi in centesimi, legge il ruolo dalla sessione e verifica lo stato prima di ogni transizione. Una doppia approvazione produce una sola decisione. |
-| **Input e output** | Ricevute sintetiche in JSON, coda Finance in tabella, CSV contabile scaricabile dopo l’approvazione e registro consultabile. |
-| **Notifica** | Pagina mobile simulata sul PC, alimentata dallo stato reale della pratica. |
+| **Policy** | Un PDF con testo selezionabile, che contiene almeno tetti per ruolo o livello (non criteri vaghi come «hotel ragionevole»). Lo carica Finance dalla chat. Il testo si estrae con `unpdf`, si divide per sezioni e il modello riceve solo l’indice e gli estratti pertinenti, così il costo per messaggio non cresce con la lunghezza del documento. Il testo completo serve al server per verificare le citazioni. Senza PDF caricato si usa una policy di esempio. |
+| **Modello** | Gemini interpreta la conversazione. Quando è sicuro restituisce una proposta strutturata con categoria, importo, urgenza, limite per il profilo e **citazione testuale** della policy. Se non è sicuro, chiede o dichiara la policy non chiara. Se il modello non risponde, la chat lo dice e nessuna pratica viene toccata. |
+| **Controlli** | Il server verifica la proposta: la citazione deve comparire nella policy, il limite deve essere scritto nella citazione, gli importi sono interi in centesimi. Se non regge, c’è un solo nuovo tentativo con l’errore, poi il caso va al manager come policy non chiara. Il server calcola residuo, extra e priorità, legge il ruolo dall’utente e verifica lo stato prima di ogni transizione. Una doppia approvazione produce una sola decisione. |
+| **Interfaccia** | Solo chat, una per utente. L’agente mostra sotto i messaggi schede con i pulsanti di conferma, approvazione, ricevuta, rimborso e CSV. Le azioni partono dai pulsanti e mai dal testo del modello. Le altre persone ricevono le notifiche come messaggi nella loro chat. |
+| **Input e output** | Ricevute sintetiche in JSON, coda Finance mostrata in chat, CSV contabile scaricabile dopo l’approvazione e registro consultabile dalla chat. |
+| **Notifica** | Pagina mobile simulata sul PC, alimentata dallo stato reale della pratica. Come canale opzionale, un bot Telegram per il manager, con la pagina simulata come riserva. |
 
-Il piano assume una demo locale e una chiave API funzionante. Verificate subito l’eventuale requisito di pubblicazione. La priorità di sviluppo va al flusso dei rimborsi, con una policy e un caso taxi. OCR, pagamenti effettivi, push reali e integrazioni contabili sono fuori dallo scope del prototipo.
+Il piano assume una demo locale e una chiave API funzionante. Verificate subito l’eventuale requisito di pubblicazione. La priorità di sviluppo va al flusso dei rimborsi, con una policy e un caso taxi. OCR, pagamenti effettivi e integrazioni contabili sono fuori dallo scope del prototipo. Le notifiche push dell’app sono simulate. L’unico canale esterno reale è il bot Telegram del manager, con dati sintetici e un token creato per la demo.
+
+## Crescita progressiva del prodotto
+
+Ogni livello riusa il flusso del precedente e parte solo quando il precedente passa il collaudo. Nel pitch i livelli successivi al primo si presentano come direzione di sviluppo, a meno che le prove non li abbiano resi stabili.
+
+| Livello | Cosa si aggiunge | Cosa resta invariato | Condizione per procedere |
+|---|---|---|---|
+| **1. Taxi, un profilo** | Percorso completo da domanda a CSV, con **30 €** residui e **12 €** di deroga. | Ruoli dipendente, manager e Finance. | Collaudo base superato. |
+| **2. Chat, notifica, storico** | Funzioni incrementali già descritte sopra. Il bot Telegram del manager si aggiunge dopo la notifica simulata, perché usa lo stesso endpoint di decisione. | Pratica, stati e registro. | Il caso base passa due volte di fila. |
+| **3. Seniority** | Posizione nell’account e limiti per posizione scritti nel testo della policy. L’agente trova il limite del profilo. | Verifica della citazione e calcolo degli importi lato server. | Due profili danno esiti diversi sullo stesso taxi. |
+| **4. Categorie di trasferta** | La policy testuale copre treno, cibo, hotel e altre spese. Una domanda sulla trasferta restituisce le voci attese e il residuo di ciascuna. | Flusso di deroga, ricevuta, coda Finance e CSV. | Una seconda categoria completa il percorso fino al CSV. |
+| **5. Carta virtuale simulata** | Carta con plafond pari all’importo autorizzato, generata dopo l’approvazione o dentro il budget del profilo. La ricevuta riconcilia la spesa con il plafond. | Decisioni, registro e approvazione Finance dell’export. | Il caso taxi da 42 € passa dalla carta alla riga CSV. |
+| **6. Trasferta completa** | Budget complessivo della trasferta che somma le categorie, con residuo aggiornato a ogni pratica. | Registro unico per pratica e per trasferta. | Fuori dallo scope della demo. Resta nella roadmap. |
+
+I limiti per posizione vengono dalla policy letta dall’agente. La carta eredita il limite verificato e non può superarlo. In produzione la carta richiederebbe un emittente reale, controlli antifrode e un’integrazione con la contabilità, quindi nel pitch la presentiamo come evoluzione naturale del rimborso.
+
+Il server calcola sempre importi, residui ed extra. Il modello legge la policy e propone limite e citazione, ma il server verifica la citazione e non accetta limiti che il testo non contiene.
 
 ## Piano di sviluppo · 4 ore e 30 minuti
 
@@ -69,7 +108,7 @@ Il piano assume una demo locale e una chiave API funzionante. Verificate subito 
 | **2:50–3:25** | Implementa la richiesta integrativa solo se il caso base passa due volte di fila. | Verifica il caso da 48 €, prepara pitch e submission. | Il caso integrativo funziona oppure si mantiene il caso base per il pitch. |
 | **3:25–4:30** | Corregge i blocchi di demo. Prepara il reset e le finestre del browser. | Conduce due prove cronometrate, registra una demo di riserva e completa la submission. | Due prove sotto tre minuti, demo ripetibile e consegna completata. |
 
-**Se al minuto 90 l’export è ancora incompleto, sospendete le aggiunte.** Completate il percorso base, poi collegate la chat. In caso di ritardo, tagliate prima la deroga integrativa, poi lo storico. Per la notifica basta un banner nella pagina manager. Dal minuto **205**, la priorità è consegnare.
+**Se al minuto 90 l’export è ancora incompleto, sospendete le aggiunte.** Completate il percorso base, poi collegate la chat. In caso di ritardo, tagliate prima le categorie oltre al taxi, poi la carta virtuale, poi i profili per seniority, poi la deroga integrativa, poi lo storico. Per la notifica basta un banner nella pagina manager, e il bot Telegram si taglia per primo tra le funzioni di notifica. Dal minuto **205**, la priorità è consegnare.
 
 ## Collaudo prima del pitch
 
@@ -78,6 +117,8 @@ Il piano assume una demo locale e una chiave API funzionante. Verificate subito 
 - [ ] L’export richiesto prima dell’approvazione Finance viene bloccato dal server.
 - [ ] Una deroga rifiutata resta fuori dalla coda Finance e il registro mostra il rifiuto.
 - [ ] La ricevuta da **48 €** lascia la pratica in revisione. Se è disponibile la richiesta integrativa, la seconda deroga vale **6 €**.
+- [ ] Il ticket del taxi arriva al manager con etichetta **Urgente**. La coda mette in cima il ticket di priorità più alta, e il client non può cambiare l’etichetta.
+- [ ] Il pulsante **Approva** su Telegram produce la stessa decisione dell’interfaccia web. Una chat non collegata a un manager riceve un rifiuto dal server, e un secondo tocco sullo stesso ticket non crea una seconda decisione.
 - [ ] Due clic su **Approva** lasciano una sola decisione nel registro.
 - [ ] Dopo il reset, il caso riparte con **30 €** residui e le due finestre mantengono sessioni distinte.
 

@@ -1,32 +1,31 @@
-import policy from "../fixtures/policy.json";
-import { DEMO_TRIP_ID, openDatabase } from "../lib/db";
+import { DEMO_TRIP_ID } from "../lib/db";
+import { ResetButton } from "./components";
 
-export const dynamic = "force-dynamic";
+const SCREENS = [
+  { href: "/employee", title: "Dipendente", text: "Chiede all'assistente se una spesa rientra nella policy e invia la richiesta." },
+  { href: "/manager", title: "Manager", text: "Riceve le richieste con priorità e citazione della policy, e decide." },
+  { href: "/finance", title: "Finance", text: "Carica la policy in PDF, approva i rimborsi e scarica il CSV." },
+];
 
 export default function Home() {
-  const db = openDatabase();
-  let budget: number;
-  try {
-    const trip = db.prepare("SELECT remaining_budget_cents FROM trips WHERE id = ?").get(DEMO_TRIP_ID);
-    if (typeof trip?.remaining_budget_cents !== "number") {
-      throw new Error("Budget demo non disponibile");
-    }
-    budget = trip.remaining_budget_cents;
-  } finally {
-    db.close();
-  }
-
-  const remainingBudget = new Intl.NumberFormat("it-IT", {
-    style: "currency",
-    currency: "EUR",
-  }).format(budget / 100);
-
   return (
-    <main>
-      <h1>Rimborsi di trasferta</h1>
-      <h2>Trasferta demo {DEMO_TRIP_ID}</h2>
-      <p>Budget residuo: {remainingBudget}</p>
-      <p>Policy {policy.version} · {policy.taxi.id} · {policy.taxi.text}</p>
+    <main className="narrow">
+      <header>
+        <div>
+          <h1>Assistente rimborsi</h1>
+          <div className="muted">Trasferta {DEMO_TRIP_ID} · dati sintetici</div>
+        </div>
+        <ResetButton />
+      </header>
+      <p>Apri una finestra per ruolo, una accanto all'altra. Ogni schermata è una chat separata.</p>
+      <div className="cards">
+        {SCREENS.map((s) => (
+          <a key={s.href} href={s.href} className="card link">
+            <strong>{s.title}</strong>
+            <div className="muted">{s.text}</div>
+          </a>
+        ))}
+      </div>
     </main>
   );
 }
