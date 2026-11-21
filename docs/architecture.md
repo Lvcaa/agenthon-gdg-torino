@@ -18,11 +18,15 @@ Next.js (App Router), TypeScript, SQLite (`node:sqlite`, file `.data/agenthon.sq
 Ogni schermata è una conversazione separata, aggiornata ogni 3 secondi: si aprono in tre finestre affiancate.
 | POST | `/api/chat` | `{actorId, message}`. Un turno con l'agente: il modello risponde, il server verifica l'eventuale proposta e salva i messaggi. Non crea pratiche. |
 | POST | `/api/policy` | Solo Finance. `multipart/form-data` con `actorId` e `file` (PDF, massimo 5 MB e 100 pagine, testo selezionabile). Estrae il testo, lo divide in sezioni, lo rende la policy attiva e salva l'originale in `.data/policies/<versione>.pdf`. |
-| POST | `/api/chat/confirm` | `{actorId, messageId}`. Il dipendente conferma la proposta: il server la rilegge dalla chat, la riverifica sulla policy e crea la pratica. |
-| POST | `/api/requests/[id]/decision` | Il manager approva o rifiuta (`decision`). Un secondo identico non crea una seconda decisione. Canale sempre `web`. |
+| POST | `/api/chat/confirm` | `{actorId, messageId}`. Il dipendente conferma la proposta: il server la rilegge dalla chat, la riverifica sulla policy e crea la pratica. Se nasce autorizzata, genera la carta virtuale. |
+| POST | `/api/requests/[id]/decision` | Il manager approva o rifiuta (`decision`). Un secondo identico non crea una seconda decisione. Canale sempre `web`. Se approva, genera la carta virtuale; se rifiuta con residuo, apre il percorso con carta personale. |
 | POST | `/api/requests/[id]/receipt` | Il dipendente carica una ricevuta sintetica costruita sulla pratica (`kind`: `exact`, pari all'autorizzato, oppure `over`, +6 €). |
 | POST | `/api/requests/[id]/finance` | Finance approva il rimborso. |
 | GET | `/api/requests/[id]/csv?actorId=` | CSV della pratica. Bloccato (409) finché Finance non ha approvato. |
+| POST | `/api/requests/[id]/pay` | Solo sandbox. `{actorId, amountCents?}` (intero positivo, default = autorizzato). Il proprietario simula il pagamento con la carta virtuale attiva. Stripe lo rifiuta se supera il tetto. |
+| POST | `/api/requests/[id]/documents` | `multipart/form-data` con `actorId`, `kind` (`receipt`, `invoice`) e `file` (PDF, JPG, PNG, WebP, massimo 10 MB). Permessi e stato si controllano prima di chiamare il modello (`assertCanAttach`). Il modello legge il documento, il server calcola l'importo (422 se illeggibile o se il tipo contraddice `kind`) e salva il file in `.data/documents/<pratica>/<kind>.<ext>`. |
+| GET | `/api/requests/[id]/ticket?actorId=` | Solo Finance, dopo la verifica dei documenti. PDF (`application/pdf`, inline) con riepilogo, ricevuta di transazione e originali. |
+| POST | `/api/stripe/webhook` | Firma `Stripe-Signature` verificata con `STRIPE_WEBHOOK_SECRET` (503 se manca, 400 se non valida). `issuing_transaction.created` registra la transazione e disattiva la carta; gli altri eventi sono ignorati con 200. Idempotente. Facoltativo: il pagamento simulato registra già la transazione. |
 | POST | `/api/demo/reset` | Riporta lo scenario ai 30 € residui e svuota le chat. Solo demo. |
 
 Il codice di collegamento Telegram si genera dalla chat («collega Telegram»).
@@ -37,6 +41,13 @@ Il codice di collegamento Telegram si genera dalla chat («collega Telegram»).
 | `lib/proposal.ts` | `verifyProposal`: controlla la proposta dell'agente (citazione presente nella policy, limite scritto nella citazione, importi in centesimi interi). |
 | `lib/agent.ts` | `agentTurn`: prompt con policy, profilo e stato, chiamata al modello, verifica con un nuovo tentativo, scelta della scheda da mostrare. Il modello è iniettabile per i test. |
 | `lib/flow.ts` | Pratica e registro: conferma della proposta, decisione manager, ricevuta, approvazione Finance, CSV, codice Telegram, reset, notifiche in chat. Ogni funzione verifica permesso e stato. Errori come `FlowError` con codice HTTP. |
+| `lib/card-provider.ts` | `cardProviderFromEnv`: sceglie il provider delle carte virtuali con `CARD_PROVIDER` (`simulator`, `lithic`, `stripe`), tutti con l'interfaccia `StripeIssuing`. Le route e `lib/http.ts` usano solo questa funzione, mai `stripeFromEnv` direttamente. Predefinito `simulator`. |
+| `lib/card-simulator.ts` | Emittente simulato senza rete (tetto `all_time`, categorie ammesse, carta attiva, idempotenza), stato in `.data/card-simulator.json`. |
+| `lib/lithic.ts` | Provider Lithic sandbox (`https://sandbox.lithic.com`, mai produzione): carta `SINGLE_USE` con `spend_limit`, regola MCC per carta (con controllo anche lato client), pagamento simulato con `simulate/authorize` e `simulate/clearing`. La transazione compare in modo asincrono: la lettura riprova sul 404. Valuta USD. |
+| `lib/stripe.ts` | Client REST di Stripe Issuing (niente SDK): `stripeFromEnv` (null senza chiave, errore se non `sk_test_`), titolare e carta virtuale (idempotency key `card-<pratica>`), disattivazione, pagamento di prova (Test Helpers), `verifyWebhook` (HMAC con tolleranza) e `transactionFromStripe`. |
+| `lib/categories.ts` | Categorie di spesa (categorie Stripe, MCC, fattura richiesta, etichetta della ricevuta) e dati di fatturazione aziendali sintetici `COMPANY_BILLING`. |
+| `lib/document-extract.ts` | `extractDocument`: Gemini legge scontrino o fattura (immagine o PDF) e restituisce testo dell'importo, esercente, data, P.IVA venditore e acquirente. `toCents` converte l'importo in centesimi e rifiuta i valori ambigui, `isCompanyVat` confronta l'acquirente con l'azienda. |
+| `lib/ticket-pdf.ts` | `buildTicketPdf` (pdf-lib): ticket per Finance con riepilogo, ricevuta di transazione e originali accodati. |
 | `lib/gemini.ts` | `generateJson(prompt, system)`: chiamata a Gemini con risposta JSON, temperatura 0.2 e retry su 503 e 429. |
 | `lib/http.ts`, `lib/format.ts` | Helper dei route handler e formattazione degli importi. |
 | `app/chat-screen.tsx`, `app/components.tsx` | Schermata a chat condivisa (server: messaggi e schede dal database) e componenti client: input, pulsanti, caricamento del PDF. Le pagine `employee`, `manager`, `finance` e la pagina iniziale la usano. |
@@ -78,6 +89,13 @@ Regole applicate in `lib/flow.ts`:
 - Il canale `telegram` nelle decisioni lo imposta solo il codice del bot, mai il client.
 - Le notifiche sono messaggi dell'assistente nella chat dell'altra persona (manager alla nuova richiesta, dipendente alla decisione, Finance alla ricevuta verificata).
 
+## Carta virtuale e documenti
+
+- **Quando nasce la carta:** solo con la pratica autorizzata (entro il residuo o approvata dal manager). Il server crea la riga `cards` in `pending` nella transazione, poi la route chiama `issueCard` dopo il commit. Il tetto (`all_time`) è l'autorizzato esatto, le categorie ammesse vengono dalla categoria di spesa, la carta è monouso: dopo il primo pagamento catturato è disattivata. Il limite lo applica Stripe, non c'è autorizzazione in tempo reale. Doppi clic o webhook più risposta API non duplicano carte né transazioni.
+- **Deroga rifiutata:** niente Stripe. Con residuo maggiore di zero il dipendente paga con la propria carta fino al residuo, carica i documenti e riceve il rimborso a fine mese di `min(scontrino, residuo)`; l'eccedenza resta a suo carico (esito `capped`). Con residuo zero non c'è rimborso. Stesso percorso (`funding = personal`) se Stripe non è configurato o fallisce, e se il dipendente ha una pratica pagata con carta da oltre 7 giorni (`DOCUMENT_DEADLINE_DAYS`) senza documenti completi.
+- **Documenti:** lo scontrino o la ricevuta è obbligatorio per ogni pratica, la fattura intestata all'azienda solo per le categorie con `requires_invoice`. Con la carta si caricano dopo il pagamento. Con tutti i documenti il server scrive la verifica: scontrino uguale alla transazione e non oltre l'autorizzato è `match` (in coda Finance), altrimenti `mismatch` o `over_authorized` (in revisione); fattura non intestata all'azienda manda in revisione.
+- **UI:** il messaggio con la carta mostra ultime 4 cifre, tetto, categoria, stato, documenti richiesti e dati di fatturazione. Il popup «Ricordati la fattura» compare solo per le categorie con fattura. Il pulsante «Paga con la carta (sandbox)» e i pulsanti sintetici «Ricevuta» (scorciatoia demo) convivono con il caricamento reale. Finance vede funding ed esito e apre il Ticket PDF.
+
 ## Bot Telegram
 
 Non ancora implementato. Pronti: il database e le funzioni `createLinkCode` e `redeemLinkCode` in `lib/flow.ts` (la UI genera già il codice). Il database ha `roles_and_users.telegram_chat_id` e `telegram_link_codes`. Il collegamento usa un codice monouso e il ruolo viene sempre letto dal database. Impostazioni, comandi e regole sono in [telegram.md](telegram.md).
@@ -90,18 +108,22 @@ Importi sempre in centesimi. Tabelle (`STRICT`, chiavi esterne attive):
 |---|---|
 | `trips` | `id`, `remaining_budget_cents`. |
 | `roles` | `role` (PK: junior, senior, lead, director) e `description`. I limiti di spesa non sono nel database: li legge l'agente dalla policy. |
-| `roles_and_users` | `id` (UUID), `name`, `role` (FK su `roles`, seniority), `permission` (`employee`, `manager`, `finance`), `telegram_chat_id` opzionale. |
+| `roles_and_users` | `id` (UUID), `name`, `role` (FK su `roles`, seniority), `permission` (`employee`, `manager`, `finance`), `telegram_chat_id` opzionale, `stripe_cardholder_id` (creato alla prima carta). |
 | `telegram_link_codes` | Codici monouso con scadenza per associare `telegram_chat_id` a un utente. |
 | `policy_documents` | Le policy: `version` (PK, impronta del testo), `filename`, `source` (`pdf`, `seed`), `pages`, `text`, `uploaded_by`, `active`. Una sola è attiva. |
 | `policy_chunks` | Le sezioni: `version`, `idx`, `heading`, `page`, `text`. |
 | `chat_messages` | Conversazione di ogni utente: ruolo (`user`, `assistant`), testo, scheda JSON opzionale e `request_id` quando una proposta è stata confermata. |
-| `requests` | La pratica: utente, trasferta, categoria, importo, residuo, extra, importo autorizzato, stato, priorità (1-4) e regola, urgenza, versione policy, sezione e citazione della clausola, flag `policy_gap`, motivazione. |
+| `requests` | La pratica: utente, trasferta, categoria, importo, residuo, extra, importo autorizzato, stato, priorità (1-4) e regola, urgenza, versione policy, sezione e citazione della clausola, flag `policy_gap`, motivazione e `funding` (`card`, `personal`, vuoto per il percorso storico). |
 | `approvals` | Decisioni (`manager`, `manager_supplement`, `finance`) con attore, canale (`web`, `telegram`) e ora. `UNIQUE (request_id, kind)`: una doppia approvazione lascia una sola decisione. |
-| `receipts` | Una ricevuta per pratica, con importo ed esito (`match`, `over_authorized`). |
+| `receipts` | La verifica dei documenti, una per pratica: importo, esito (`match`, `over_authorized`, `capped`, `mismatch`) e `reimbursed_cents`. |
+| `expense_categories` | Le categorie (vedi `lib/categories.ts`): categorie Stripe, MCC, `requires_invoice`, nota sulla fattura. |
+| `cards` | La carta virtuale di una pratica (una sola): id Stripe, ultime 4 cifre, scadenza, tetto in centesimi, categorie ammesse, stato (`pending`, `active`, `inactive`, `failed`) ed errore. |
+| `card_transactions` | I pagamenti catturati (id Stripe come chiave, quindi idempotenti): importo, esercente, MCC, ora, JSON grezzo. |
+| `documents` | Scontrino e fattura di una pratica (`UNIQUE (request_id, kind)`): importo, esercente, P.IVA, intestazione all'azienda, origine (`upload`, `synthetic`), percorso del file ed estrazione. |
 | `events` | Registro append-only collegato alla pratica e all'attore. |
 
 Stati della pratica: `draft`, `pending_manager`, `approved`, `rejected`, `in_review`, `pending_finance`, `finance_approved`, `exported`.
 
 ## Configurazione
 
-`.env.local` (non versionato, modello in `.env.example`): `GEMINI_GDG_KEY`, `GEMINI_MODEL` (default `gemini-3-flash-preview`), `TELEGRAM_BOT_TOKEN` (previsto, non ancora letto dal codice).
+`.env.local` (non versionato, modello in `.env.example`): `GEMINI_GDG_KEY`, `GEMINI_MODEL` (default `gemini-3-flash-preview`), `TELEGRAM_BOT_TOKEN` (previsto, non ancora letto dal codice), `CARD_PROVIDER` (`simulator`, `lithic` o `stripe`), `LITHIC_API_KEY` (provider lithic), `STRIPE_SECRET_KEY` (provider stripe, solo chiavi `sk_test_`: una chiave live è rifiutata), `STRIPE_REGION` (provider stripe), `STRIPE_WEBHOOK_SECRET` (`whsec_…`, serve solo a `/api/stripe/webhook`). Se il provider scelto non è configurato non si generano carte e vale il percorso con carta personale. I documenti caricati stanno in `.data/documents/`.
