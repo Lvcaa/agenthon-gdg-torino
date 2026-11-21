@@ -14,6 +14,7 @@ import {
   type Status,
 } from "../lib/flow";
 import { loadPolicy, readPolicy } from "../lib/policy";
+import { IconChart, IconShield, IconUser, Logo } from "./icons";
 
 const STATUS_LABEL: Record<Status, string> = {
   draft: "Bozza",
@@ -27,11 +28,23 @@ const STATUS_LABEL: Record<Status, string> = {
 };
 const CATEGORY_LABEL: Record<string, string> = { taxi: "Taxi", train: "Treno", meals: "Cibo", hotel: "Hotel", other: "Altro" };
 const TITLE: Record<Permission, string> = { employee: "Dipendente", manager: "Manager", finance: "Finance" };
-const SCREENS: { permission: Permission; href: string }[] = [
-  { permission: "employee", href: "/employee" },
-  { permission: "manager", href: "/manager" },
-  { permission: "finance", href: "/finance" },
+const SCREENS: { permission: Permission; href: string; icon: ReactNode }[] = [
+  { permission: "employee", href: "/employee", icon: <IconUser /> },
+  { permission: "manager", href: "/manager", icon: <IconShield /> },
+  { permission: "finance", href: "/finance", icon: <IconChart /> },
 ];
+const SUBTITLE: Record<Permission, string> = {
+  employee: "Chiedi prima di spendere",
+  manager: "Decidi solo le eccezioni",
+  finance: "Pratiche pronte per la contabilità",
+};
+const initials = (name: string) =>
+  name
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
 const PLACEHOLDER: Record<string, string> = {
   employee: "Scrivi cosa ti serve, per esempio: «Sono davanti alla stazione, il taxi costa 42 €. Rientra nel mio budget?»",
   manager: "Qui arrivano le richieste da approvare. Puoi chiedere «cosa ho in coda?»",
@@ -129,38 +142,64 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
     db.close();
   }
 
+  const chat = <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} />;
+
   return (
-    <main className={aside ? "wide" : "narrow"}>
-      <header>
-        <div>
-          <h1>{TITLE[permission]}</h1>
-          <div className="muted">
-            {actor.name} · {actor.role} · trasferta {DEMO_TRIP_ID} · policy {activeVersion}
-          </div>
-        </div>
-        <ResetButton />
-      </header>
-      <nav>
-        {SCREENS.map((s) => (
-          <a key={s.href} href={s.href} className={s.permission === permission ? "active" : ""}>
-            {TITLE[s.permission]}
-          </a>
-        ))}
-        {users.length > 1 &&
-          users.map((u) => (
-            <a key={u.id} href={`?as=${u.id}`} className={u.id === actor.id ? "active user" : "user"}>
-              {u.name} · {u.role}
+    <div className="shell">
+      <aside className="sidebar">
+        <a href="/" className="brand">
+          <Logo size={28} />
+          <span className="wordmark">Ask<i>&amp;</i>Card</span>
+        </a>
+        <nav className="nav-group" aria-label="Ruoli">
+          <div className="nav-label">Vista</div>
+          {SCREENS.map((s) => (
+            <a key={s.href} href={s.href} className={s.permission === permission ? "nav-item active" : "nav-item"}>
+              {s.icon}
+              {TITLE[s.permission]}
             </a>
           ))}
-      </nav>
-      {aside ? (
-        <div className="columns">
-          <div>{aside}</div>
-          <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} />
+        </nav>
+        {users.length > 1 && (
+          <nav className="nav-group" aria-label="Utente">
+            <div className="nav-label">Accedi come</div>
+            {users.map((u) => (
+              <a key={u.id} href={`?as=${u.id}`} className={u.id === actor.id ? "nav-item active" : "nav-item"}>
+                <span className="avatar">{initials(u.name)}</span>
+                {u.name}
+                <span className="meta">{u.role}</span>
+              </a>
+            ))}
+          </nav>
+        )}
+        <div className="sidebar-foot">
+          <dl className="facts">
+            <dt>Trasferta</dt>
+            <dd>{DEMO_TRIP_ID}</dd>
+            <dt>Policy</dt>
+            <dd>{activeVersion}</dd>
+          </dl>
+          <ResetButton />
         </div>
-      ) : (
-        <Chat actorId={actor.id} permission={actor.permission} messages={messages} placeholder={PLACEHOLDER[permission]} />
-      )}
-    </main>
+      </aside>
+      <main className="content">
+        <header className="topbar">
+          <div className="who">
+            <h1>{actor.name}</h1>
+            <span className="sub">
+              {TITLE[permission]} · {actor.role} — {SUBTITLE[permission]}
+            </span>
+          </div>
+        </header>
+        {aside ? (
+          <div className="workspace with-aside">
+            <div className="aside">{aside}</div>
+            {chat}
+          </div>
+        ) : (
+          <div className="workspace">{chat}</div>
+        )}
+      </main>
+    </div>
   );
 }
