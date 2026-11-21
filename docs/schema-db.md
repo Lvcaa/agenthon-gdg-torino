@@ -1,6 +1,6 @@
 # Schema del database
 
-SQLite (`.data/agenthon.sqlite`), tabelle `STRICT` con chiavi esterne attive. Importi in centesimi, date in ISO 8601 UTC. Definizione in [lib/db.ts](../lib/db.ts).
+SQLite (`data/agenthon.sqlite`), tabelle `STRICT` con chiavi esterne attive. Importi in centesimi, date in ISO 8601 UTC. Definizione in [lib/db.ts](../lib/db.ts).
 
 ## Tabelle
 
@@ -113,8 +113,8 @@ Decisioni su una pratica.
 | request_id | TEXT | **FK** → `requests.id` |
 | kind | TEXT | `manager`, `manager_supplement`, `finance` |
 | decision | TEXT | `approved`, `rejected` |
-| decided_by | TEXT | **FK** → `roles_and_users.id` |
-| channel | TEXT | `web`, `telegram` |
+| decided_by | TEXT | **FK** → `roles_and_users.id`, vuoto solo con `channel = 'agent'` |
+| channel | TEXT | `web`, `telegram`, `agent` (approvazione automatica dei documenti coerenti) |
 | amount_cents | INTEGER | nullable |
 | decided_at | TEXT | |
 
@@ -128,8 +128,9 @@ Ricevuta collegata alla pratica.
 | **id** | TEXT | **PK** |
 | request_id | TEXT | **FK** → `requests.id`, `UNIQUE` |
 | amount_cents | INTEGER | > 0 |
-| outcome | TEXT | `match`, `over_authorized` |
-| raw_json | TEXT | ricevuta originale |
+| outcome | TEXT | `match`, `over_authorized`, `capped`, `mismatch` |
+| raw_json | TEXT | ricevuta, con `checks`: i controlli della riconciliazione |
+| reimbursed_cents | INTEGER | nullable |
 | verified_at | TEXT | |
 
 ### `events`

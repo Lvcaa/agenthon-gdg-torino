@@ -75,11 +75,6 @@ test("le mie richieste: in corso con i documenti mancanti, completate dopo Finan
   assert.equal(employeeRequests(db, anna, "open")[0].canUpload, true);
 
   attachReceipt(db, anna, r.id, "exact");
-  open = employeeRequests(db, anna, "open");
-  assert.equal(open[0].status, "pending_finance", "in coda Finance resta in corso");
-  assert.deepEqual(open[0].missing, []);
-
-  financeApprove(db, paolo, r.id);
   assert.deepEqual(employeeRequests(db, anna, "open"), []);
   assert.deepEqual(ids(employeeRequests(db, anna, "done")), [r.id]);
 
@@ -163,7 +158,12 @@ test("finance: ricerca per nome e ticket con i download", async (t) => {
   ]);
   assert.equal(ticket.outcome, "match");
   assert.equal(ticket.spent_cents, 4200);
-  assert.deepEqual(ticket.decisions.map((d) => [d.kind, d.decision, d.by]), [["manager", "approved", "Giulia Verdi"]]);
+  assert.deepEqual(ticket.decisions.map((d) => [d.kind, d.decision, d.by]), [
+    ["manager", "approved", "Giulia Verdi"],
+    ["finance", "approved", "Agente di verifica"],
+  ]);
+  assert.equal(ticket.canApprove, false, "già approvata in automatico");
+  assert.ok(ticket.checks.every((c) => c.ok));
 
   const receipt = documentDownload(db, paolo, r.id, "receipt");
   assert.equal(receipt.type, "summary", "scontrino sintetico: PDF con i dati estratti");
@@ -182,10 +182,10 @@ test("finance: ricerca per nome e ticket con i download", async (t) => {
 });
 
 test("safeDocumentPath accetta solo file dentro la cartella dei documenti", () => {
-  const root = resolve("/srv/app/.data/documents");
-  assert.equal(safeDocumentPath("/srv/app/.data/documents/abc/receipt.pdf", root), join(root, "abc", "receipt.pdf"));
-  assert.equal(safeDocumentPath("/srv/app/.data/documents/../agenthon.sqlite", root), null);
+  const root = resolve("/srv/app/data/documents");
+  assert.equal(safeDocumentPath("/srv/app/data/documents/abc/receipt.pdf", root), join(root, "abc", "receipt.pdf"));
+  assert.equal(safeDocumentPath("/srv/app/data/documents/../agenthon.sqlite", root), null);
   assert.equal(safeDocumentPath("/etc/passwd", root), null);
-  assert.equal(safeDocumentPath("/srv/app/.data/documents", root), null);
+  assert.equal(safeDocumentPath("/srv/app/data/documents", root), null);
   assert.equal(safeDocumentPath(null, root), null);
 });

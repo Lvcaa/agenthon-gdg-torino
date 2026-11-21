@@ -7,7 +7,7 @@ Prototipo per la traccia B. L’app verifica policy e budget di una trasferta, g
 
 ## Avvio locale
 
-Serve Node.js 24 o successivo. SQLite è incluso in Node. Il primo accesso crea `.data/agenthon.sqlite` con la trasferta sintetica T-042 e 30 € di budget residuo.
+Serve Node.js 24 o successivo. SQLite è incluso in Node. Il primo accesso crea `data/agenthon.sqlite` con la trasferta sintetica T-042 e 30 € di budget residuo.
 
 ```sh
 npm ci
@@ -22,10 +22,12 @@ La pagina iniziale ha i link alle tre schermate. Aprile in tre finestre: **Dipen
 
 Il provider si sceglie con `CARD_PROVIDER` in `.env.local`:
 
-- `simulator` (predefinito): nessun account, nessuna rete. Applica tetto, categoria e monouso come una carta vera. Stato in `.data/card-simulator.json`.
+- `simulator` (predefinito): nessun account, nessuna rete. Applica tetto, categoria e monouso come una carta vera. Stato in `data/card-simulator.json`.
 - `lithic` (consigliato per la demo): sandbox gratuita su lithic.com, nessuna verifica aziendale. Copia la sandbox API key in `LITHIC_API_KEY`. Carta `SINGLE_USE` con tetto pari all'autorizzato; il pagamento oltre il tetto lo rifiuta Lithic. Valuta USD in sandbox.
 - `stripe`: Stripe Issuing in sandbox (`STRIPE_SECRET_KEY` `sk_test_…`, `STRIPE_REGION=us`). Richiede Issuing attivo e la verifica aziendale, e non è disponibile per account con sede in Italia. Saldo di test: `node --env-file=.env.local scripts/stripe-setup.ts`. Webhook facoltativo: `stripe listen --forward-to localhost:3000/api/stripe/webhook` e segreto in `STRIPE_WEBHOOK_SECRET`.
 
-Percorso: il dipendente conferma la richiesta, il manager approva (o la richiesta rientra nel residuo), compare la carta virtuale. Con **Paga con la carta (sandbox)** si simula il pagamento, poi si caricano lo scontrino (sempre) e la fattura intestata all'azienda (hotel, noleggio, carburante, congressi, altre spese), letti con Gemini. Finance approva e apre il **Ticket PDF**. Se la deroga è rifiutata non si genera nessuna carta: il dipendente paga con la sua fino al residuo e viene rimborsato a fine mese. Se il provider non è configurato vale lo stesso percorso con carta personale.
+Percorso: il dipendente conferma la richiesta, il manager approva (o la richiesta rientra nel residuo), compare la carta virtuale. Con **Paga con la carta (sandbox)** si simula il pagamento, poi si caricano lo scontrino (sempre) e la fattura intestata all'azienda (hotel, noleggio, carburante, congressi, altre spese), letti con Gemini. Il server confronta scontrino, fattura e transazione: se tutto combacia il rimborso è approvato in automatico, altrimenti la pratica va in revisione e Finance la controlla e la approva a mano (una ricevuta oltre l'autorizzato resta ferma). Finance apre il **Ticket PDF** e scarica il CSV. Se la deroga è rifiutata non si genera nessuna carta: il dipendente paga con la sua fino al residuo e viene rimborsato a fine mese. Se il provider non è configurato vale lo stesso percorso con carta personale.
 
-Per provare il caricamento c'è [policy-demo.pdf](policy-demo.pdf), generato dalla policy di esempio. Si rigenera con `npm run policy:pdf`.
+Per provare il caricamento dei documenti, dopo il pagamento con la carta genera uno scontrino (e la fattura, se serve) coerente con l'ultima pratica pagata: `npm run docs:sample`. Con `npm run docs:sample -- <id> --wrong=amount` (oppure `card`, `ref`, `date`, `buyer`) un solo dato è sbagliato e la pratica va in revisione. I PDF finiscono in `data/samples/` (visibile nel Finder, esclusa da git).
+
+Per provare il caricamento della policy c'è [policy-demo.pdf](policy-demo.pdf), generato dalla policy di esempio. Si rigenera con `npm run policy:pdf`.

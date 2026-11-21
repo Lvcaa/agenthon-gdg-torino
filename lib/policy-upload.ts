@@ -19,7 +19,7 @@ export async function uploadPolicyPdf(
   db: DatabaseSync,
   actorId: unknown,
   file: { name: string; bytes: Uint8Array },
-  directory = join(process.cwd(), ".data", "policies"),
+  directory = join(process.cwd(), "data", "policies"),
 ): Promise<Policy> {
   const actor = getActor(db, actorId, "finance");
   if (file.bytes.length === 0 || file.bytes.length > MAX_PDF_BYTES) {

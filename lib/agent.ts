@@ -47,7 +47,7 @@ function stateSummary(db: DatabaseSync, actor: Actor): string {
       .join("\n");
     return `Già autorizzato in questa trasferta: ${spent}.\nLe tue richieste:\n${open || "- nessuna"}`;
   }
-  const statuses = actor.permission === "manager" ? (["pending_manager"] as const) : (["pending_finance", "finance_approved"] as const);
+  const statuses = actor.permission === "manager" ? (["pending_manager"] as const) : (["in_review", "pending_finance", "finance_approved"] as const);
   const queue = listRequests(db, { statuses: [...statuses] })
     .map((r) => `- ${r.employee_name} (${r.employee_role}): ${r.category} ${formatEuro(r.amount_cents)}, extra ${formatEuro(r.extra_cents)}, priorità ${r.priority_label}, stato ${r.status}`)
     .join("\n");
@@ -187,7 +187,7 @@ export async function agentTurn(db: DatabaseSync, actorId: unknown, text: unknow
     const ids = listRequests(db, { userId: actor.id }).slice(-8).map((r) => r.id);
     card = ids.length ? { type: "requests", ids } : null;
   } else if (output.show === "queue") {
-    const statuses = actor.permission === "manager" ? (["pending_manager"] as const) : (["pending_finance", "finance_approved"] as const);
+    const statuses = actor.permission === "manager" ? (["pending_manager"] as const) : (["in_review", "pending_finance", "finance_approved"] as const);
     const ids = listRequests(db, { statuses: [...statuses] }).map((r) => r.id);
     card = ids.length ? { type: "requests", ids } : null;
   } else if (output.show === "registry") {

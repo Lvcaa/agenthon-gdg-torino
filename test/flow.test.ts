@@ -13,6 +13,7 @@ import {
   createLinkCode,
   decide,
   exportCsv,
+  attachDocument,
   financeApprove,
   listMessages,
   listRequests,
@@ -92,13 +93,14 @@ test("the 42 EUR taxi goes from chat to CSV", async (t) => {
 
   assert.equal(decide(db, giulia, sent.id, "approved").request.authorized_cents, 4200);
   await settleCard(db, fakeStripe(), anna, sent.id);
-  assert.equal(attachReceipt(db, anna, sent.id, "exact").status, "pending_finance");
-  assert.equal(financeApprove(db, paolo, sent.id).request.status, "finance_approved");
+  // documenti coerenti con la transazione: l'agente di verifica approva al posto di Finance
+  assert.equal(attachReceipt(db, anna, sent.id, "exact").status, "finance_approved");
+  assert.equal(financeApprove(db, paolo, sent.id).duplicate, true, "il clic di Finance non crea una seconda decisione");
 
   const { csv } = exportCsv(db, paolo, sent.id);
   const [header, line] = csv.trim().split("\n");
   assert.match(header, /^request_id,trip_id,employee,category,amount_cents,amount_eur/);
-  assert.match(line, /,T-042,Anna Rossi,taxi,4200,42\.00,R-[0-9A-F]{8},Giulia Verdi,Paolo Neri,[0-9a-f]{8},2\. Trasporti locali \(taxi\) \(p\. 1\),card,0,ipi_fake_\d+$/);
+  assert.match(line, /,T-042,Anna Rossi,taxi,4200,42\.00,R-[0-9A-F]{8},Giulia Verdi,Agente di verifica,[0-9a-f]{8},2\. Trasporti locali \(taxi\) \(p\. 1\),card,0,ipi_fake_\d+$/);
   assert.equal(listRequests(db)[0].status, "exported");
 
   const types = db.prepare("SELECT type FROM events ORDER BY id").all().map((e) => e.type);
@@ -109,7 +111,7 @@ test("the 42 EUR taxi goes from chat to CSV", async (t) => {
     "card_payment_captured",
     "document_attached",
     "receipt_verified",
-    "finance_approved",
+    "finance_auto_approved",
     "csv_exported",
   ]);
 });
@@ -241,7 +243,8 @@ test("export is blocked until Finance approves", async (t) => {
   decide(db, giulia, sent.id, "approved");
   expectError(409, () => exportCsv(db, paolo, sent.id));
   await settleCard(db, fakeStripe(), anna, sent.id);
-  attachReceipt(db, anna, sent.id, "exact");
+  // scontrino diverso dalla transazione: in revisione, export bloccato finché Finance non approva a mano
+  attachDocument(db, anna, sent.id, { kind: "receipt", amountCents: 4000, source: "upload", docDate: new Date().toISOString().slice(0, 10) });
   expectError(409, () => exportCsv(db, paolo, sent.id));
   expectError(403, () => financeApprove(db, giulia, sent.id));
   financeApprove(db, paolo, sent.id);
@@ -267,9 +270,9 @@ test("the receipt follows the authorized amount of the request", async (t) => {
   await settleCard(db, fakeStripe(), anna, sent.id);
   expectError(400, () => attachReceipt(db, anna, sent.id, "42"));
   const done = attachReceipt(db, anna, sent.id, "exact");
-  assert.equal(done.status, "pending_finance");
+  assert.equal(done.status, "finance_approved");
   assert.equal(db.prepare("SELECT amount_cents FROM receipts WHERE request_id = ?").get(sent.id)?.amount_cents, 3100);
-  assert.equal(listRequests(db, { statuses: ["pending_finance"] }).length, 1);
+  assert.equal(listRequests(db, { statuses: ["finance_approved"] }).length, 1);
 });
 
 test("a 48 EUR receipt stays in review", async (t) => {
@@ -278,8 +281,9 @@ test("a 48 EUR receipt stays in review", async (t) => {
   decide(db, giulia, sent.id, "approved");
   await settleCard(db, fakeStripe(), anna, sent.id);
   assert.equal(attachReceipt(db, anna, sent.id, "over").status, "in_review");
-  assert.equal(listRequests(db, { statuses: ["pending_finance"] }).length, 0);
-  expectError(409, () => financeApprove(db, paolo, sent.id));
+  assert.equal(listRequests(db, { statuses: ["pending_finance", "finance_approved"] }).length, 0);
+  expectError(409, () => financeApprove(db, paolo, sent.id)); // oltre soglia serve la deroga integrativa, non Finance
+  assert.equal(count(db, "SELECT COUNT(*) AS count FROM approvals WHERE kind = 'finance'"), 0);
 });
 
 test("approving twice leaves one decision", async (t) => {
@@ -293,9 +297,10 @@ test("approving twice leaves one decision", async (t) => {
 
   await settleCard(db, fakeStripe(), anna, sent.id);
   attachReceipt(db, anna, sent.id, "exact");
-  assert.equal(financeApprove(db, paolo, sent.id).duplicate, false);
+  assert.equal(financeApprove(db, paolo, sent.id).duplicate, true, "già approvata dall'agente");
   assert.equal(financeApprove(db, paolo, sent.id).duplicate, true);
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM approvals WHERE kind = 'finance'"), 1);
+  assert.equal(db.prepare("SELECT channel FROM approvals WHERE kind = 'finance'").get()?.channel, "agent");
 });
 
 test("a request within the profile limit needs no waiver", async (t) => {
@@ -330,7 +335,7 @@ test("people are notified in their own chat", async (t) => {
 
   await settleCard(db, fakeStripe(), anna, sent.id);
   attachReceipt(db, anna, sent.id, "exact");
-  assert.match(listMessages(db, paolo).at(-1)!.content, /verificata/);
+  assert.match(listMessages(db, paolo).at(-1)!.content, /approvata in automatico/);
 });
 
 test("the agent can show the queue, the log and a Telegram code", async (t) => {

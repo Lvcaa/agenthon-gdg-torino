@@ -130,8 +130,9 @@ const SCHEMA = `
     request_id TEXT NOT NULL REFERENCES requests (id),
     kind TEXT NOT NULL CHECK (kind IN ('manager', 'manager_supplement', 'finance')),
     decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
-    decided_by TEXT NOT NULL REFERENCES roles_and_users (id),
-    channel TEXT NOT NULL DEFAULT 'web' CHECK (channel IN ('web', 'telegram')),
+    -- decided_by vuoto solo per le decisioni automatiche dell'agente di verifica (channel = 'agent').
+    decided_by TEXT REFERENCES roles_and_users (id),
+    channel TEXT NOT NULL DEFAULT 'web' CHECK (channel IN ('web', 'telegram', 'agent')),
     amount_cents INTEGER CHECK (amount_cents >= 0),
     decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (request_id, kind)
@@ -188,6 +189,8 @@ const SCHEMA = `
     vat_number TEXT,
     invoiced_to_company INTEGER CHECK (invoiced_to_company IN (0, 1)),
     payment_method TEXT NOT NULL DEFAULT 'unknown' CHECK (payment_method IN ('card', 'cash', 'unknown')),
+    card_last4 TEXT,
+    transaction_ref TEXT,
     source TEXT NOT NULL CHECK (source IN ('upload', 'synthetic')),
     filename TEXT,
     mime TEXT,
@@ -270,6 +273,37 @@ function migrate(db: DatabaseSync) {
     db.exec("ALTER TABLE roles_and_users ADD COLUMN stripe_cardholder_id TEXT");
   }
 
+  // La cartella dei dati era .data (nascosta nel Finder): i percorsi salvati puntano ora a data/.
+  db.exec("UPDATE documents SET path = 'data/' || substr(path, 7) WHERE path LIKE '.data/%'");
+
+  // documents: ultime cifre della carta e riferimento della transazione stampati sul documento.
+  const documentColumns = columns("documents");
+  if (!documentColumns.includes("card_last4")) db.exec("ALTER TABLE documents ADD COLUMN card_last4 TEXT");
+  if (!documentColumns.includes("transaction_ref")) db.exec("ALTER TABLE documents ADD COLUMN transaction_ref TEXT");
+
+  // approvals: canale 'agent' e decided_by facoltativo per l'approvazione automatica. Si ricostruisce la tabella.
+  const approvalSql = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approvals'").get()?.sql ?? "");
+  if (approvalSql && !approvalSql.includes("'agent'")) {
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec(`
+      ALTER TABLE approvals RENAME TO approvals_old;
+      CREATE TABLE approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id TEXT NOT NULL REFERENCES requests (id),
+        kind TEXT NOT NULL CHECK (kind IN ('manager', 'manager_supplement', 'finance')),
+        decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+        decided_by TEXT REFERENCES roles_and_users (id),
+        channel TEXT NOT NULL DEFAULT 'web' CHECK (channel IN ('web', 'telegram', 'agent')),
+        amount_cents INTEGER CHECK (amount_cents >= 0),
+        decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (request_id, kind)
+      ) STRICT;
+      INSERT INTO approvals SELECT * FROM approvals_old;
+      DROP TABLE approvals_old;
+    `);
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+
   // receipts: nuovi esiti (capped, mismatch) e rimborso. Il CHECK non si altera, quindi si ricostruisce la tabella.
   const receiptSql = String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'").get()?.sql ?? "");
   if (receiptSql && (!receiptSql.includes("'capped'") || !columns("receipts").includes("reimbursed_cents"))) {
@@ -294,7 +328,7 @@ function migrate(db: DatabaseSync) {
   }
 }
 
-export function openDatabase(filename = join(process.cwd(), ".data", "agenthon.sqlite")) {
+export function openDatabase(filename = join(process.cwd(), "data", "agenthon.sqlite")) {
   mkdirSync(dirname(filename), { recursive: true });
   const db = new DatabaseSync(filename);
   try {

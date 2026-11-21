@@ -2,6 +2,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { COMPANY_BILLING, EXPENSE_CATEGORIES, type CategoryRule } from "./categories.ts";
 import { DEMO_TRIP_ID } from "./db.ts";
+import { normalizeRef } from "./document-extract.ts";
 import { formatEuro } from "./format.ts";
 import { readPolicy, type Category } from "./policy.ts";
 import { verifyProposal, type Urgency, type VerifiedProposal } from "./proposal.ts";
@@ -109,6 +110,8 @@ export interface DocumentRow {
   vat_number: string | null;
   invoiced_to_company: number | null;
   payment_method: "card" | "cash" | "unknown";
+  card_last4: string | null;
+  transaction_ref: string | null;
   source: "upload" | "synthetic";
   filename: string | null;
   mime: string | null;
@@ -155,6 +158,8 @@ const PRIORITY_RULES: Record<Urgency, string> = {
 };
 const EXTRA_BUMP_THRESHOLD_CENTS = 1000;
 export const RECEIPT_OVER_CENTS = 600; // la variante «oltre l'autorizzato» supera di 6 €
+// Nome con cui compaiono le decisioni automatiche (approvals.channel = 'agent', decided_by vuoto).
+export const AGENT_NAME = "Agente di verifica";
 const LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const LINK_CODE_TTL_MS = 10 * 60 * 1000;
 
@@ -674,6 +679,8 @@ export interface DocumentInput {
   vatNumber?: string | null;
   invoicedToCompany?: boolean | null;
   paymentMethod?: "card" | "cash" | "unknown";
+  cardLast4?: string | null;
+  transactionRef?: string | null;
   source: "upload" | "synthetic";
   filename?: string | null;
   mime?: string | null;
@@ -700,12 +707,12 @@ function attachDocumentTx(db: DatabaseSync, actor: Actor, requestId: unknown, in
 
   db.prepare(
     `INSERT INTO documents (id, request_id, kind, amount_cents, merchant, doc_date, vat_number, invoiced_to_company,
-       payment_method, source, filename, mime, path, extracted_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       payment_method, card_last4, transaction_ref, source, filename, mime, path, extracted_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     randomUUID(), row.id, input.kind, input.amountCents, input.merchant ?? null, input.docDate ?? null, input.vatNumber ?? null,
     input.invoicedToCompany === undefined || input.invoicedToCompany === null ? null : input.invoicedToCompany ? 1 : 0,
-    paymentMethod, input.source, input.filename ?? null, input.mime ?? null, input.path ?? null,
+    paymentMethod, input.cardLast4 ?? null, input.transactionRef ?? null, input.source, input.filename ?? null, input.mime ?? null, input.path ?? null,
     input.extracted === undefined ? null : JSON.stringify(input.extracted),
   );
   logEvent(db, row.id, actor.id, "document_attached", { kind: input.kind, amountCents: input.amountCents, source: input.source });
@@ -718,24 +725,19 @@ function attachDocumentTx(db: DatabaseSync, actor: Actor, requestId: unknown, in
 
   const docs = documentsOf(db, row.id);
   const receipt = docs.find((d) => d.kind === "receipt")!;
-  const invoice = docs.find((d) => d.kind === "invoice");
   const authorized = row.authorized_cents!;
   const spent = receipt.amount_cents;
-
-  let outcome: ReceiptOutcome;
-  let reimbursed: number | null;
-  if (row.funding === "card") {
-    outcome = spent > authorized ? "over_authorized" : spent !== transaction!.amount_cents ? "mismatch" : "match";
-    reimbursed = 0;
-  } else if (row.funding === "personal") {
-    outcome = spent <= authorized ? "match" : "capped";
-    reimbursed = Math.min(spent, authorized);
-  } else {
-    outcome = spent <= authorized ? "match" : "over_authorized";
-    reimbursed = outcome === "match" ? spent : null;
-  }
-  const invoiceProblem = categoryRule(row.category).requiresInvoice && invoice?.invoiced_to_company === 0;
-  const status: Status = (outcome === "match" || outcome === "capped") && !invoiceProblem ? "pending_finance" : "in_review";
+  const { outcome, reimbursed, checks } = reconcile({
+    funding: row.funding,
+    authorizedCents: authorized,
+    requiresInvoice: categoryRule(row.category).requiresInvoice,
+    receipt,
+    invoice: docs.find((d) => d.kind === "invoice"),
+    transaction,
+    cardLast4: cardOf(db, row.id)?.last4 ?? null,
+  });
+  const failed = checks.filter((c) => !c.ok);
+  const autoApproved = failed.length === 0;
 
   const raw = {
     receiptId: `R-${row.id.slice(0, 8).toUpperCase()}`,
@@ -744,11 +746,11 @@ function attachDocumentTx(db: DatabaseSync, actor: Actor, requestId: unknown, in
     amountCents: spent,
     currency: "EUR",
     transactionId: transaction?.id ?? null,
+    checks,
   };
   db.prepare(
     "INSERT INTO receipts (id, request_id, amount_cents, outcome, raw_json, reimbursed_cents) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(randomUUID(), row.id, spent, outcome, JSON.stringify(raw), reimbursed);
-  setStatus(db, row.id, status);
   logEvent(db, row.id, actor.id, "receipt_verified", {
     receiptId: raw.receiptId,
     receiptCents: spent,
@@ -756,33 +758,141 @@ function attachDocumentTx(db: DatabaseSync, actor: Actor, requestId: unknown, in
     outcome,
     reimbursedCents: reimbursed,
     funding: row.funding,
+    checks,
   });
-  if (invoiceProblem) {
-    logEvent(db, row.id, actor.id, "invoice_not_company", { expected: COMPANY_BILLING.name, vatNumber: invoice?.vat_number ?? null });
-  }
 
-  let text: string;
-  if (invoiceProblem) {
-    text = `La fattura non risulta intestata a ${COMPANY_BILLING.name}. La pratica resta in revisione.`;
-  } else if (outcome === "match") {
-    text =
-      row.funding === "card"
-        ? `Scontrino da ${formatEuro(spent)} verificato: corrisponde al pagamento con carta. La pratica passa a Finance.`
-        : `Ricevuta da ${formatEuro(spent)} verificata: corrisponde all'importo autorizzato. La pratica passa a Finance.`;
-  } else if (outcome === "capped") {
-    text = `Scontrino da ${formatEuro(spent)}: il rimborso è limitato a ${formatEuro(authorized)}, l'eccedenza di ${formatEuro(spent - authorized)} resta a tuo carico. La pratica passa a Finance.`;
-  } else if (outcome === "mismatch") {
-    text = `Lo scontrino da ${formatEuro(spent)} non corrisponde al pagamento di ${formatEuro(transaction!.amount_cents)}. La pratica resta in revisione.`;
-  } else {
-    text = `La ricevuta da ${formatEuro(spent)} supera i ${formatEuro(authorized)} autorizzati. La pratica resta in revisione.`;
-  }
-  say(db, actor.id, text, row.id);
-  if (status === "pending_finance") {
+  if (autoApproved) {
+    // Tutto combacia: l'agente di verifica approva al posto di Finance. Una sola decisione per pratica (UNIQUE).
+    db.prepare("INSERT INTO approvals (request_id, kind, decision, decided_by, channel) VALUES (?, 'finance', 'approved', NULL, 'agent')").run(row.id);
+    setStatus(db, row.id, "finance_approved");
+    logEvent(db, row.id, null, "finance_auto_approved", { checks: checks.map((c) => c.id) });
+    const refund = row.funding === "card" ? "" : ` Rimborso di ${formatEuro(reimbursed ?? spent)} a fine mese.`;
+    const capped = outcome === "capped" ? ` L'eccedenza di ${formatEuro(spent - authorized)} resta a tuo carico.` : "";
+    say(db, actor.id, `Documenti verificati: ${checks.length} controlli superati. Rimborso approvato in automatico.${refund}${capped}`, row.id);
     for (const financeId of usersWith(db, "finance")) {
-      say(db, financeId, `Pratica di ${actor.name} verificata: ricevuta ${formatEuro(spent)}, autorizzato ${formatEuro(authorized)}.`, row.id);
+      say(db, financeId, `Pratica di ${actor.name} approvata in automatico: documento ${formatEuro(spent)}, autorizzato ${formatEuro(authorized)}. CSV disponibile.`, row.id);
+    }
+  } else {
+    setStatus(db, row.id, "in_review");
+    const reasons = failed.map((c) => c.detail).join("; ");
+    if (failed.some((c) => c.id === "invoice_company")) {
+      logEvent(db, row.id, actor.id, "invoice_not_company", { expected: COMPANY_BILLING.name, vatNumber: docs.find((d) => d.kind === "invoice")?.vat_number ?? null });
+    }
+    say(db, actor.id, `Documenti ricevuti, ma qualcosa non combacia: ${reasons}. La pratica resta in revisione.`, row.id);
+    const next = outcome === "over_authorized" ? "Serve una deroga integrativa del manager." : "Controlla i documenti e approva o lascia in revisione.";
+    for (const financeId of usersWith(db, "finance")) {
+      say(db, financeId, `Pratica di ${actor.name} da rivedere: ${reasons}. ${next}`, row.id);
     }
   }
   return getRequest(db, row.id);
+}
+
+export interface ReconCheck {
+  id: "within_authorized" | "transaction_amount" | "transaction_date" | "card_last4" | "transaction_ref" | "invoice_company" | "invoice_amount";
+  ok: boolean;
+  detail: string;
+}
+
+export interface ReconInput {
+  funding: Funding | null;
+  authorizedCents: number;
+  requiresInvoice: boolean;
+  receipt: Pick<DocumentRow, "amount_cents" | "doc_date" | "card_last4" | "transaction_ref">;
+  invoice?: Pick<DocumentRow, "amount_cents" | "invoiced_to_company">;
+  transaction?: Pick<CardTransactionRow, "id" | "authorization_id" | "amount_cents" | "captured_at">;
+  cardLast4: string | null;
+}
+
+// Giorni di scarto ammessi tra la data dello scontrino e quella della transazione (fusi orari, corse notturne).
+export const RECEIPT_DATE_TOLERANCE_DAYS = 2;
+
+// Riconciliazione deterministica dei dati estratti dal modello: scontrino, fattura e transazione della carta.
+// Il modello legge i documenti, qui il server confronta. Se un controllo fallisce la pratica va in revisione a Finance.
+// Un dato non stampato (ultime cifre, riferimento) non blocca; un dato stampato e diverso sì.
+export function reconcile(input: ReconInput): { outcome: ReceiptOutcome; reimbursed: number | null; checks: ReconCheck[] } {
+  const { funding, authorizedCents: authorized, receipt, invoice, transaction } = input;
+  const spent = receipt.amount_cents;
+  const checks: ReconCheck[] = [];
+
+  if (funding === "personal") {
+    // Carta personale: il rimborso è min(scontrino, residuo), l'eccedenza è a carico del dipendente per regola.
+    checks.push({
+      id: "within_authorized",
+      ok: true,
+      detail: spent <= authorized ? `scontrino ${formatEuro(spent)} entro il residuo` : `rimborso limitato a ${formatEuro(authorized)}`,
+    });
+  } else {
+    checks.push({
+      id: "within_authorized",
+      ok: spent <= authorized,
+      detail: spent <= authorized ? `scontrino ${formatEuro(spent)} entro l'autorizzato` : `lo scontrino da ${formatEuro(spent)} supera i ${formatEuro(authorized)} autorizzati`,
+    });
+  }
+
+  if (funding === "card" && transaction) {
+    const sameAmount = spent === transaction.amount_cents;
+    checks.push({
+      id: "transaction_amount",
+      ok: sameAmount,
+      detail: sameAmount ? "importo uguale alla transazione" : `lo scontrino da ${formatEuro(spent)} non corrisponde al pagamento di ${formatEuro(transaction.amount_cents)}`,
+    });
+    const paidOn = transaction.captured_at.slice(0, 10);
+    const days = receipt.doc_date ? Math.abs(Date.parse(receipt.doc_date) - Date.parse(paidOn)) / DAY_MS : NaN;
+    checks.push({
+      id: "transaction_date",
+      ok: days <= RECEIPT_DATE_TOLERANCE_DAYS,
+      detail: !receipt.doc_date
+        ? "data dello scontrino non leggibile"
+        : days <= RECEIPT_DATE_TOLERANCE_DAYS
+          ? "data coerente con il pagamento"
+          : `lo scontrino è del ${receipt.doc_date}, il pagamento del ${paidOn}`,
+    });
+    if (receipt.card_last4) {
+      const ok = receipt.card_last4 === input.cardLast4;
+      checks.push({ id: "card_last4", ok, detail: ok ? `carta **** ${receipt.card_last4}` : `lo scontrino riporta la carta **** ${receipt.card_last4}, non quella della pratica` });
+    }
+    if (receipt.transaction_ref) {
+      const ref = normalizeRef(receipt.transaction_ref);
+      const known = [transaction.id, transaction.authorization_id].map(normalizeRef).filter((k) => k.length >= 4);
+      const ok = ref.length >= 4 && known.some((k) => k === ref || k.endsWith(ref) || ref.endsWith(k));
+      checks.push({ id: "transaction_ref", ok, detail: ok ? "riferimento della transazione corrispondente" : `il riferimento ${receipt.transaction_ref} non corrisponde alla transazione` });
+    }
+  }
+
+  if (input.requiresInvoice) {
+    const company = invoice?.invoiced_to_company === 1;
+    checks.push({
+      id: "invoice_company",
+      ok: company,
+      detail: company
+        ? `fattura intestata a ${COMPANY_BILLING.name}`
+        : invoice?.invoiced_to_company === 0
+          ? `la fattura non è intestata a ${COMPANY_BILLING.name}`
+          : "intestatario della fattura non leggibile",
+    });
+    if (invoice) {
+      const same = invoice.amount_cents === spent;
+      checks.push({
+        id: "invoice_amount",
+        ok: same,
+        detail: same ? "fattura e scontrino con lo stesso importo" : `la fattura da ${formatEuro(invoice.amount_cents)} non corrisponde allo scontrino da ${formatEuro(spent)}`,
+      });
+    }
+  }
+
+  let outcome: ReceiptOutcome;
+  let reimbursed: number | null;
+  if (funding === "card") {
+    outcome = spent > authorized ? "over_authorized" : checks.every((c) => c.ok) ? "match" : "mismatch";
+    reimbursed = 0;
+  } else if (funding === "personal") {
+    outcome = spent <= authorized ? "match" : "capped";
+    reimbursed = Math.min(spent, authorized);
+  } else {
+    outcome = spent <= authorized ? (checks.every((c) => c.ok) ? "match" : "mismatch") : "over_authorized";
+    reimbursed = spent <= authorized ? spent : null;
+  }
+  return { outcome, reimbursed, checks };
 }
 
 // Pre-validazione leggera (prima di chiamare il modello sul file): proprietario, stato e documento non ancora presente.
@@ -821,7 +931,15 @@ export function attachReceipt(db: DatabaseSync, actorId: unknown, requestId: unk
     const amountCents = base + (kind === "over" ? RECEIPT_OVER_CENTS : 0);
     const rule = categoryRule(row.category);
     const docDate = nowIso().slice(0, 10);
-    const synthetic = { amountCents, merchant: "Fornitore demo", docDate, source: "synthetic" as const };
+    const transaction = transactionOf(db, row.id);
+    const synthetic = {
+      amountCents,
+      merchant: transaction?.merchant_name ?? "Fornitore demo",
+      docDate,
+      cardLast4: row.funding === "card" ? cardOf(db, row.id)?.last4 ?? null : null,
+      transactionRef: transaction?.authorization_id ?? null,
+      source: "synthetic" as const,
+    };
     if (rule.requiresInvoice) {
       attachDocumentTx(db, actor, row.id, {
         ...synthetic,
@@ -865,8 +983,8 @@ export function ticketData(db: DatabaseSync, actorId: unknown, requestId: unknow
   };
   const decisions = db
     .prepare(
-      `SELECT a.kind, a.decision, u.name AS by, a.channel, a.decided_at AS at
-       FROM approvals a JOIN roles_and_users u ON u.id = a.decided_by WHERE a.request_id = ? ORDER BY a.id`,
+      `SELECT a.kind, a.decision, COALESCE(u.name, '${AGENT_NAME}') AS by, a.channel, a.decided_at AS at
+       FROM approvals a LEFT JOIN roles_and_users u ON u.id = a.decided_by WHERE a.request_id = ? ORDER BY a.id`,
     )
     .all(request.id) as unknown as TicketData["decisions"];
   const rule = categoryRule(request.category);
@@ -918,22 +1036,41 @@ export function ticketData(db: DatabaseSync, actorId: unknown, requestId: unknow
   };
 }
 
+// Controlli salvati con la verifica (raw_json della ricevuta). Le pratiche vecchie non li hanno.
+export function checksOf(rawJson: string): ReconCheck[] {
+  try {
+    const checks = JSON.parse(rawJson)?.checks;
+    return Array.isArray(checks) ? checks : [];
+  } catch {
+    return [];
+  }
+}
+
+// Stessa regola di financeApprove, per mostrare il pulsante.
+export function canFinanceApprove(status: Status, outcome: ReceiptOutcome | null): boolean {
+  return status === "pending_finance" || (status === "in_review" && outcome !== null && outcome !== "over_authorized");
+}
+
 // 4. Finance approva il rimborso. Solo dopo, il server abilita il CSV.
 export function financeApprove(db: DatabaseSync, actorId: unknown, requestId: unknown): { request: RequestRow; duplicate: boolean } {
   const actor = getActor(db, actorId, "finance");
   return tx(db, () => {
     const row = getRequest(db, requestId);
-    if (row.status !== "pending_finance") {
-      const already = db.prepare("SELECT 1 AS ok FROM approvals WHERE request_id = ? AND kind = 'finance'").get(row.id);
-      if (already) return { request: row, duplicate: true };
-      throw new FlowError(409, "La pratica non è in coda Finance");
+    const already = db.prepare("SELECT 1 AS ok FROM approvals WHERE request_id = ? AND kind = 'finance'").get(row.id);
+    if (already) return { request: row, duplicate: true };
+    if (row.status !== "pending_finance" && row.status !== "in_review") throw new FlowError(409, "La pratica non è in coda Finance");
+    if (row.status === "in_review") {
+      const receipt = db.prepare("SELECT outcome FROM receipts WHERE request_id = ?").get(row.id) as { outcome: ReceiptOutcome } | undefined;
+      if (!receipt) throw new FlowError(409, "Documenti non ancora verificati");
+      // La ricevuta oltre l'autorizzato si ferma: serve una deroga integrativa del manager, non basta Finance.
+      if (receipt.outcome === "over_authorized") throw new FlowError(409, "La ricevuta supera l'autorizzato: serve una deroga integrativa del manager");
     }
     db.prepare("INSERT INTO approvals (request_id, kind, decision, decided_by, channel) VALUES (?, 'finance', 'approved', ?, 'web')").run(
       row.id,
       actor.id,
     );
     setStatus(db, row.id, "finance_approved");
-    logEvent(db, row.id, actor.id, "finance_approved", {});
+    logEvent(db, row.id, actor.id, "finance_approved", { afterReview: row.status === "in_review" });
     say(db, row.user_id, `${actor.name} (Finance) ha approvato il rimborso.`, row.id);
     say(db, actor.id, "Rimborso approvato. Ora puoi scaricare il CSV.", row.id);
     return { request: getRequest(db, row.id), duplicate: false };
@@ -959,7 +1096,7 @@ export function exportCsv(db: DatabaseSync, actorId: unknown, requestId: unknown
         `SELECT e.name AS employee, rc.amount_cents AS receipt_cents, rc.raw_json AS raw_json, rc.reimbursed_cents AS reimbursed_cents,
                 (SELECT ct.id FROM card_transactions ct WHERE ct.request_id = r.id ORDER BY ct.captured_at, ct.id LIMIT 1) AS card_transaction_id,
                 (SELECT m.name FROM approvals a JOIN roles_and_users m ON m.id = a.decided_by WHERE a.request_id = r.id AND a.kind = 'manager') AS manager,
-                (SELECT f.name FROM approvals a JOIN roles_and_users f ON f.id = a.decided_by WHERE a.request_id = r.id AND a.kind = 'finance') AS finance
+                (SELECT COALESCE(f.name, '${AGENT_NAME}') FROM approvals a LEFT JOIN roles_and_users f ON f.id = a.decided_by WHERE a.request_id = r.id AND a.kind = 'finance') AS finance
          FROM requests r
          JOIN roles_and_users e ON e.id = r.user_id
          JOIN receipts rc ON rc.request_id = r.id

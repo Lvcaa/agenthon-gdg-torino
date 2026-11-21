@@ -5,13 +5,16 @@ import { DEMO_TRIP_ID, openDatabase } from "../lib/db";
 import { formatEuro } from "../lib/format";
 import {
   RECEIPT_OVER_CENTS,
+  canFinanceApprove,
   cardView,
+  checksOf,
   listEvents,
   listMessages,
   listRequests,
   type Actor,
   type Card,
   type Permission,
+  type ReceiptOutcome,
   type RequestRow,
   type RequestView,
   type Status,
@@ -24,7 +27,7 @@ const STATUS_LABEL: Record<Status, string> = {
   pending_manager: "In attesa del manager",
   approved: "Autorizzata, attende la ricevuta",
   rejected: "Rifiutata",
-  in_review: "In revisione (ricevuta oltre l'autorizzato)",
+  in_review: "In revisione Finance (documenti da controllare)",
   pending_finance: "In coda Finance",
   finance_approved: "Approvata da Finance",
   exported: "Esportata",
@@ -33,7 +36,7 @@ const OUTCOME_LABEL: Record<string, string> = {
   match: "documenti coerenti",
   over_authorized: "oltre l'autorizzato",
   capped: "rimborso limitato al residuo",
-  mismatch: "non corrisponde alla transazione",
+  mismatch: "documenti non coerenti",
 };
 export const CATEGORY_LABEL: Record<string, string> = { taxi: "Taxi", train: "Treno", meals: "Cibo", hotel: "Hotel", other: "Altro" };
 const TITLE: Record<Permission, string> = { employee: "Dipendente", manager: "Manager", finance: "Finance" };
@@ -74,6 +77,10 @@ export function statusLabel(db: DatabaseSync, r: RequestRow): string {
   if (r.status === "rejected" && r.funding === "personal" && (r.authorized_cents ?? 0) > 0) {
     return `Deroga rifiutata: carta personale fino a ${formatEuro(r.authorized_cents ?? 0)}`;
   }
+  if (r.status === "finance_approved" || r.status === "exported") {
+    const auto = db.prepare("SELECT 1 AS ok FROM approvals WHERE request_id = ? AND kind = 'finance' AND channel = 'agent'").get(r.id);
+    if (auto) return r.status === "exported" ? "Approvata in automatico, esportata" : "Approvata in automatico (documenti coerenti)";
+  }
   return STATUS_LABEL[r.status];
 }
 
@@ -111,9 +118,19 @@ export function buildCard(db: DatabaseSync, requestId: string): CardPanelData {
   };
 }
 
+function receiptOf(db: DatabaseSync, requestId: string) {
+  return db.prepare("SELECT outcome, raw_json FROM receipts WHERE request_id = ?").get(requestId) as
+    | { outcome: ReceiptOutcome; raw_json: string }
+    | undefined;
+}
+
+// Esito della verifica, con i controlli non superati se ce ne sono.
 function verificationOf(db: DatabaseSync, requestId: string): string | null {
-  const row = db.prepare("SELECT outcome FROM receipts WHERE request_id = ?").get(requestId) as { outcome: string } | undefined;
-  return row ? (OUTCOME_LABEL[row.outcome] ?? row.outcome) : null;
+  const row = receiptOf(db, requestId);
+  if (!row) return null;
+  const failed = checksOf(row.raw_json).filter((c) => !c.ok);
+  const label = OUTCOME_LABEL[row.outcome] ?? row.outcome;
+  return failed.length ? `${label}: ${failed.map((c) => c.detail).join("; ")}` : label;
 }
 
 function toItem(db: DatabaseSync, r: RequestView): RequestItem {
@@ -133,6 +150,7 @@ function toItem(db: DatabaseSync, r: RequestView): RequestItem {
     statusLabel: statusLabel(db, r),
     funding: r.funding === "card" ? "carta virtuale" : r.funding === "personal" ? "carta personale, rimborso" : null,
     verification: verificationOf(db, r.id),
+    financeApprovable: canFinanceApprove(r.status, receiptOf(db, r.id)?.outcome ?? null),
     awaitingDocs: awaitingDocs(db, r),
     card: r.funding ? buildCard(db, r.id) : null,
     clause: r.clause_id,

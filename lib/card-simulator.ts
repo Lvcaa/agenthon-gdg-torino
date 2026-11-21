@@ -24,7 +24,7 @@ interface SimState {
 
 const empty = (): SimState => ({ seq: 0, cards: {}, cardByRequest: {}, payments: {} });
 
-export function createCardSimulator(file = join(process.cwd(), ".data", "card-simulator.json")): StripeIssuing {
+export function createCardSimulator(file = join(process.cwd(), "data", "card-simulator.json")): StripeIssuing {
   const load = (): SimState => {
     try {
       return { ...empty(), ...(JSON.parse(readFileSync(file, "utf8")) as SimState) };

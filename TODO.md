@@ -15,7 +15,7 @@ Elenco di lavoro del prototipo, in ordine di priorità. Lo stato reale è nel co
 ## Da fare
 
 1. **Storico delle deroghe** (vedi il piano). Conta le decisioni per tipo di spesa, fascia dell'extra e versione della policy: «4 richieste simili su 5 approvate». Con meno di 5 casi la chat mostra «Storico insufficiente».
-2. **Revisione delle pratiche `in_review`.** Oggi una ricevuta oltre l'autorizzato o una fattura non intestata si ferma, come previsto, ma nessuno può sbloccarla. Facoltativo: una deroga integrativa del manager (`manager_supplement`), che poi entra anche nella sua coda.
+2. **Ricevuta oltre l'autorizzato.** Le pratiche `in_review` per documenti incoerenti le approva Finance a mano, ma la ricevuta oltre l'autorizzato resta ferma: serve la deroga integrativa del manager (`manager_supplement`), che poi entra anche nella sua coda. Manca anche un rifiuto esplicito di Finance.
 3. **Bot Telegram per il manager.** Database e codice di collegamento sono già pronti, vedi [docs/telegram.md](docs/telegram.md).
 4. **Sessioni vere al posto di `?as=<uuid>`.** Oggi chiunque conosca un UUID agisce come quell'utente. È un requisito per qualsiasi uso reale.
 5. **Team del manager.** `roles_and_users` non ha un responsabile: ogni manager vede le richieste di tutti.

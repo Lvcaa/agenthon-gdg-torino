@@ -32,6 +32,7 @@ export interface RequestItem {
   reason: string;
   funding: string | null;
   verification: string | null;
+  financeApprovable: boolean;
   awaitingDocs: boolean;
   card: CardPanelData | null;
 }
@@ -483,8 +484,8 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
                     <IconFile size={15} /> Ticket PDF
                   </a>
                 )}
-                {permission === "finance" && r.status === "pending_finance" && (
-                  <ActionButton label="Approva rimborso" kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${r.id}/finance`} body={{ actorId }} />
+                {permission === "finance" && r.financeApprovable && (
+                  <ActionButton label={r.status === "in_review" ? "Approva dopo revisione" : "Approva rimborso"} kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${r.id}/finance`} body={{ actorId }} />
                 )}
               </div>
             </div>

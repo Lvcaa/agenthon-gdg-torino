@@ -1,12 +1,16 @@
 import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
+  AGENT_NAME,
   FlowError,
+  canFinanceApprove,
   cardView,
+  checksOf,
   getActor,
   listRequests,
   type DocumentKind,
   type DocumentRow,
+  type ReconCheck,
   type ReceiptOutcome,
   type RequestView,
   type Status,
@@ -120,7 +124,11 @@ export function financePeople(db: DatabaseSync, actorId: unknown, query = ""): P
 export type DownloadKind = DocumentKind | "transaction";
 
 export interface FinanceTicket extends RequestView {
-  decisions: { kind: string; decision: string; by: string; at: string }[];
+  decisions: { kind: string; decision: string; by: string; channel: string; at: string }[];
+  // Controlli della riconciliazione (vuoto prima della verifica dei documenti).
+  checks: ReconCheck[];
+  // Finance può approvare a mano: in coda o in revisione per documenti, mai oltre l'autorizzato.
+  canApprove: boolean;
   outcome: ReceiptOutcome | null;
   reimbursed_cents: number | null;
   spent_cents: number | null;
@@ -135,15 +143,17 @@ export function financeTickets(db: DatabaseSync, actorId: unknown, userId: unkno
     typeof userId === "string" ? (db.prepare("SELECT id FROM roles_and_users WHERE id = ?").get(userId) as { id: string } | undefined) : undefined;
   if (!person) throw new FlowError(404, "Persona non trovata");
   const decisionsOf = db.prepare(
-    `SELECT a.kind, a.decision, u.name AS by, a.decided_at AS at FROM approvals a
-     JOIN roles_and_users u ON u.id = a.decided_by WHERE a.request_id = ? ORDER BY a.id`,
+    `SELECT a.kind, a.decision, COALESCE(u.name, '${AGENT_NAME}') AS by, a.channel, a.decided_at AS at FROM approvals a
+     LEFT JOIN roles_and_users u ON u.id = a.decided_by WHERE a.request_id = ? ORDER BY a.id`,
   );
-  const receiptOf = db.prepare("SELECT outcome, reimbursed_cents, amount_cents FROM receipts WHERE request_id = ?");
+  const receiptOf = db.prepare("SELECT outcome, reimbursed_cents, amount_cents, raw_json FROM receipts WHERE request_id = ?");
   return listRequests(db, { userId: person.id })
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .map((r) => {
       const v = cardView(db, r.id);
-      const receipt = receiptOf.get(r.id) as { outcome: ReceiptOutcome; reimbursed_cents: number | null; amount_cents: number } | undefined;
+      const receipt = receiptOf.get(r.id) as
+        | { outcome: ReceiptOutcome; reimbursed_cents: number | null; amount_cents: number; raw_json: string }
+        | undefined;
       const downloads: FinanceTicket["downloads"] = [];
       const doc = (kind: DocumentKind) => v.documents.find((d) => d.kind === kind);
       const receiptDoc = doc("receipt");
@@ -155,6 +165,8 @@ export function financeTickets(db: DatabaseSync, actorId: unknown, userId: unkno
         ...r,
         decisions: decisionsOf.all(r.id) as unknown as FinanceTicket["decisions"],
         outcome: receipt?.outcome ?? null,
+        checks: receipt ? checksOf(receipt.raw_json) : [],
+        canApprove: canFinanceApprove(r.status, receipt?.outcome ?? null),
         reimbursed_cents: receipt?.reimbursed_cents ?? null,
         spent_cents: v.transaction?.amount_cents ?? receipt?.amount_cents ?? null,
         required: v.required,
@@ -163,13 +175,13 @@ export function financeTickets(db: DatabaseSync, actorId: unknown, userId: unkno
     });
 }
 
-const DOCUMENTS_ROOT = resolve(".data", "documents");
+const DOCUMENTS_ROOT = resolve("data", "documents");
 
 function hasOriginal(d: DocumentRow): boolean {
   return d.source === "upload" && d.path !== null && d.mime !== null;
 }
 
-// Percorso dell'originale solo se sta dentro .data/documents: il percorso viene dal database, mai dal client.
+// Percorso dell'originale solo se sta dentro data/documents: il percorso viene dal database, mai dal client.
 export function safeDocumentPath(path: string | null, root = DOCUMENTS_ROOT): string | null {
   if (!path) return null;
   const full = resolve(path);

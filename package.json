@@ -12,7 +12,8 @@
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
-    "policy:pdf": "node scripts/make-policy-pdf.ts"
+    "policy:pdf": "node scripts/make-policy-pdf.ts",
+    "docs:sample": "node scripts/make-sample-docs.ts"
   },
   "dependencies": {
     "next": "^16.0.0",

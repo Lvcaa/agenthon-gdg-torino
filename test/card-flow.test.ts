@@ -64,12 +64,17 @@ async function submit(db: Db, userId: string, proposal: object = taxi(), now?: D
   return confirmProposal(db, userId, messages.at(-1)!.id, now).request;
 }
 
+const today = () => new Date().toISOString().slice(0, 10);
 const doc = (kind: "receipt" | "invoice", amountCents: number, extra: Partial<DocumentInput> = {}): DocumentInput => ({
   kind,
   amountCents,
   source: "upload",
+  docDate: today(),
   ...extra,
 });
+const checksOfRequest = (db: Db, requestId: string) =>
+  JSON.parse(String(db.prepare("SELECT raw_json FROM receipts WHERE request_id = ?").get(requestId)?.raw_json)).checks as { id: string; ok: boolean }[];
+const failedChecks = (db: Db, requestId: string) => checksOfRequest(db, requestId).filter((c) => !c.ok).map((c) => c.id);
 
 const cardOf = (db: Db, requestId: string) => db.prepare("SELECT * FROM cards WHERE request_id = ?").get(requestId);
 const requestOf = (db: Db, requestId: string) => db.prepare("SELECT * FROM requests WHERE id = ?").get(requestId)!;
@@ -158,7 +163,7 @@ test("a rejected waiver never reaches Stripe and reimburses up to the residual",
   assert.equal(JSON.parse((await agentTurnBudget(db)).card!).budgetCents, 0);
 
   const done = attachDocument(db, anna, sent.id, doc("receipt", 4200));
-  assert.equal(done.status, "pending_finance");
+  assert.equal(done.status, "finance_approved", "il rimborso limitato al residuo è una regola: approvato in automatico");
   const receipt = db.prepare("SELECT outcome, reimbursed_cents, amount_cents FROM receipts WHERE request_id = ?").get(sent.id)!;
   assert.deepEqual({ ...receipt }, { outcome: "capped", reimbursed_cents: 3000, amount_cents: 4200 });
   assert.match(lastMessage(db, anna).content, /resta a tuo carico/);
@@ -251,8 +256,10 @@ test("a taxi needs only the receipt", async (t) => {
   decide(db, giulia, sent.id, "approved");
   await settleCard(db, fakeStripe(), anna, sent.id);
   const done = attachDocument(db, anna, sent.id, doc("receipt", 4200));
-  assert.equal(done.status, "pending_finance");
+  assert.equal(done.status, "finance_approved");
   assert.equal(db.prepare("SELECT outcome FROM receipts").get()?.outcome, "match");
+  assert.equal(db.prepare("SELECT decided_by, channel FROM approvals WHERE kind = 'finance'").get()?.channel, "agent");
+  assert.match(lastMessage(db, paolo).content, /approvata in automatico/);
   expectError(409, () => attachDocument(db, anna, sent.id, doc("receipt", 4200)));
 });
 
@@ -274,7 +281,7 @@ test("a hotel also needs an invoice made out to the company", async (t) => {
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM receipts"), 0);
   assert.deepEqual(cardView(db, waiting.id).missing, ["invoice"]);
   const complete = attachDocument(db, anna, waiting.id, doc("invoice", 4200, { invoicedToCompany: true, vatNumber: "IT01234567897" }));
-  assert.equal(complete.status, "pending_finance");
+  assert.equal(complete.status, "finance_approved");
 
   // fattura intestata a un privato
   const wrong = await submit(db, marco, taxi({ limitCents: 6000 }));
@@ -284,6 +291,60 @@ test("a hotel also needs an invoice made out to the company", async (t) => {
   const review = attachDocument(db, marco, wrong.id, doc("invoice", 4200, { invoicedToCompany: false }));
   assert.equal(review.status, "in_review");
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM events WHERE type = 'invoice_not_company'"), 1);
+  assert.deepEqual(failedChecks(db, wrong.id), ["invoice_company"]);
+});
+
+test("an invoice with a different amount or no readable buyer goes to review", async (t) => {
+  const db = setup(t);
+  const stripe = fakeStripe();
+  const first = await submit(db, anna);
+  db.prepare("UPDATE requests SET category = 'hotel' WHERE id = ?").run(first.id);
+  decide(db, giulia, first.id, "approved");
+  await settleCard(db, stripe, anna, first.id);
+  attachDocument(db, anna, first.id, doc("receipt", 4200));
+  assert.equal(attachDocument(db, anna, first.id, doc("invoice", 3900, { invoicedToCompany: true })).status, "in_review");
+  assert.deepEqual(failedChecks(db, first.id), ["invoice_amount"]);
+
+  const second = await submit(db, marco, taxi({ limitCents: 6000 }));
+  db.prepare("UPDATE requests SET category = 'hotel' WHERE id = ?").run(second.id);
+  await settleCard(db, stripe, marco, second.id);
+  attachDocument(db, marco, second.id, doc("receipt", 4200));
+  assert.equal(attachDocument(db, marco, second.id, doc("invoice", 4200, { invoicedToCompany: null })).status, "in_review");
+  assert.deepEqual(failedChecks(db, second.id), ["invoice_company"]);
+});
+
+test("card digits, transaction reference and date printed on the receipt must match", async (t) => {
+  const db = setup(t);
+  const stripe = fakeStripe();
+  const paidWith = async (userId: string, proposal = taxi()) => {
+    const sent = await submit(db, userId, proposal);
+    if (sent.status === "pending_manager") decide(db, giulia, sent.id, "approved");
+    await settleCard(db, stripe, userId, sent.id);
+    const card = cardView(db, sent.id);
+    return { id: sent.id, last4: card.card!.last4!, transaction: card.transaction! };
+  };
+
+  // tutto stampato e coerente: approvata in automatico
+  const ok = await paidWith(anna);
+  const okDoc = doc("receipt", 4200, { cardLast4: ok.last4, transactionRef: ok.transaction.id });
+  assert.equal(attachDocument(db, anna, ok.id, okDoc).status, "finance_approved");
+  assert.deepEqual(checksOfRequest(db, ok.id).map((c) => c.id), ["within_authorized", "transaction_amount", "transaction_date", "card_last4", "transaction_ref"]);
+
+  const wrongCard = await paidWith(marco, taxi({ limitCents: 6000 }));
+  assert.equal(attachDocument(db, marco, wrongCard.id, doc("receipt", 4200, { cardLast4: "0000" === wrongCard.last4 ? "1111" : "0000" })).status, "in_review");
+  assert.deepEqual(failedChecks(db, wrongCard.id), ["card_last4"]);
+
+  const wrongRef = await paidWith(marco, taxi({ amountCents: 1000, limitCents: 6000 }));
+  assert.equal(attachDocument(db, marco, wrongRef.id, doc("receipt", 1000, { transactionRef: "ipi_altra_transazione" })).status, "in_review");
+  assert.deepEqual(failedChecks(db, wrongRef.id), ["transaction_ref"]);
+
+  const oldDate = await paidWith(marco, taxi({ amountCents: 900, limitCents: 6000 }));
+  assert.equal(attachDocument(db, marco, oldDate.id, doc("receipt", 900, { docDate: "2020-01-01" })).status, "in_review");
+  assert.deepEqual(failedChecks(db, oldDate.id), ["transaction_date"]);
+
+  const noDate = await paidWith(marco, taxi({ amountCents: 800, limitCents: 6000 }));
+  assert.equal(attachDocument(db, marco, noDate.id, doc("receipt", 800, { docDate: null })).status, "in_review");
+  assert.deepEqual(failedChecks(db, noDate.id), ["transaction_date"]);
 });
 
 test("a receipt that differs from the transaction goes to review", async (t) => {
@@ -293,6 +354,22 @@ test("a receipt that differs from the transaction goes to review", async (t) => 
   await settleCard(db, fakeStripe(), anna, sent.id);
   assert.equal(attachDocument(db, anna, sent.id, doc("receipt", 4000)).status, "in_review");
   assert.equal(db.prepare("SELECT outcome FROM receipts").get()?.outcome, "mismatch");
+  assert.deepEqual(failedChecks(db, sent.id), ["transaction_amount"]);
+  assert.match(lastMessage(db, paolo).content, /da rivedere/);
+  expectError(409, () => exportCsv(db, paolo, sent.id));
+  // Finance controlla e approva a mano
+  expectError(403, () => financeApprove(db, giulia, sent.id));
+  assert.equal(financeApprove(db, paolo, sent.id).request.status, "finance_approved");
+  assert.equal(db.prepare("SELECT channel, decided_by FROM approvals WHERE kind = 'finance'").get()?.decided_by, paolo);
+});
+
+test("a receipt above the authorized amount cannot be approved by Finance", async (t) => {
+  const db = setup(t);
+  const sent = await submit(db, anna);
+  decide(db, giulia, sent.id, "approved");
+  await settleCard(db, fakeStripe(), anna, sent.id);
+  assert.equal(attachDocument(db, anna, sent.id, doc("receipt", 4800)).status, "in_review");
+  assert.equal(db.prepare("SELECT outcome FROM receipts").get()?.outcome, "over_authorized");
   expectError(409, () => financeApprove(db, paolo, sent.id));
 });
 
@@ -301,12 +378,12 @@ test("Finance approving twice leaves one decision", async (t) => {
   const sent = await submit(db, anna);
   decide(db, giulia, sent.id, "approved");
   await settleCard(db, fakeStripe(), anna, sent.id);
-  attachReceipt(db, anna, sent.id, "exact");
+  attachDocument(db, anna, sent.id, doc("receipt", 4000));
   assert.equal(financeApprove(db, paolo, sent.id).duplicate, false);
   assert.equal(financeApprove(db, paolo, sent.id).duplicate, true);
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM approvals WHERE kind = 'finance'"), 1);
   const { csv } = exportCsv(db, paolo, sent.id);
-  assert.match(csv.trim().split("\n")[1], /,card,0,ipi_fake_\d+$/);
+  assert.match(csv.trim().split("\n")[1], /,Paolo Neri,.*,card,0,ipi_fake_\d+$/);
 });
 
 test("missing documents after seven days block new cards", async (t) => {
@@ -334,7 +411,7 @@ test("missing documents after seven days block new cards", async (t) => {
   await rejectsWith(409, issueCard(db, stripe, third.id));
 
   // il percorso con carta personale accetta lo scontrino fino all'autorizzato
-  assert.equal(attachDocument(db, anna, third.id, doc("receipt", 1500)).status, "pending_finance");
+  assert.equal(attachDocument(db, anna, third.id, doc("receipt", 1500)).status, "finance_approved");
 
   // con i documenti completi il blocco cade
   attachDocument(db, anna, first.id, doc("receipt", 4200));
@@ -351,7 +428,7 @@ test("without Stripe the request falls back to a personal card", async (t) => {
   assert.equal(requestOf(db, sent.id).funding, "personal");
   assert.match(lastMessage(db, anna).content, /Carta non generata.*rimborso fino a 42,00/);
 
-  assert.equal(attachDocument(db, anna, sent.id, doc("receipt", 4200)).status, "pending_finance");
+  assert.equal(attachDocument(db, anna, sent.id, doc("receipt", 4200)).status, "finance_approved");
   assert.equal(db.prepare("SELECT reimbursed_cents FROM receipts").get()?.reimbursed_cents, 4200);
 });
 
@@ -394,7 +471,7 @@ test("the Finance ticket data needs the Finance role and a verified receipt", as
   assert.equal(data.transaction?.merchantName, "TAXI TORINO SOC. COOP.");
   assert.equal(data.documents.length, 1);
   assert.equal(data.verification?.outcome, "match");
-  assert.deepEqual(data.decisions.map((d) => d.by), ["Giulia Verdi"]);
+  assert.deepEqual(data.decisions.map((d) => [d.by, d.channel]), [["Giulia Verdi", "web"], ["Agente di verifica", "agent"]]);
 });
 
 test("reset clears cards, transactions and documents but keeps cardholders", async (t) => {

@@ -1,5 +1,6 @@
 /node_modules/
 /.next/
+/data/
 /.data/
 /out/
 /next-env.d.ts

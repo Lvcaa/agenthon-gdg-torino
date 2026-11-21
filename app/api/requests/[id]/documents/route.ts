@@ -59,8 +59,8 @@ export async function POST(request: Request, { params }: IdContext) {
       console.warn(`Fattura non intestata a ${COMPANY_BILLING.name}`);
     }
 
-    const relative = join(".data", "documents", id, `${kind}.${EXTENSION[file.type]}`);
-    await mkdir(join(".data", "documents", id), { recursive: true });
+    const relative = join("data", "documents", id, `${kind}.${EXTENSION[file.type]}`);
+    await mkdir(join("data", "documents", id), { recursive: true });
     await writeFile(relative, bytes);
     try {
       const updated = attachDocument(db, actorId, id, {
@@ -71,6 +71,8 @@ export async function POST(request: Request, { params }: IdContext) {
         vatNumber: extracted.vatNumber,
         invoicedToCompany,
         paymentMethod: extracted.paymentMethod,
+        cardLast4: extracted.cardLast4,
+        transactionRef: extracted.transactionRef,
         source: "upload",
         filename: file.name.slice(0, 200),
         mime: file.type,

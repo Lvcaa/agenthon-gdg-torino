@@ -337,7 +337,7 @@ const OUTCOME_LABEL: Record<string, string> = {
   match: "documenti coerenti",
   over_authorized: "oltre l'autorizzato",
   capped: "rimborso limitato al residuo",
-  mismatch: "non corrisponde alla transazione",
+  mismatch: "documenti non coerenti",
 };
 const DECISION_KIND: Record<string, string> = { manager: "Manager", manager_supplement: "Manager (integrativa)", finance: "Finance" };
 
@@ -446,11 +446,20 @@ function tickets(db: DatabaseSync, actor: Actor, personId: string, name: string)
               </div>
             )}
           </dl>
+          {t.checks.some((c) => !c.ok) && (
+            <ul className="trail">
+              {t.checks.filter((c) => !c.ok).map((c) => (
+                <li key={c.id} className="no">
+                  {c.detail}
+                </li>
+              ))}
+            </ul>
+          )}
           {t.decisions.length > 0 && (
             <ul className="trail">
               {t.decisions.map((d, i) => (
                 <li key={i} className={d.decision === "approved" ? "ok" : "no"}>
-                  <strong>{DECISION_KIND[d.kind] ?? d.kind}:</strong> {d.decision === "approved" ? "approvata" : "rifiutata"} da {d.by}
+                  <strong>{DECISION_KIND[d.kind] ?? d.kind}:</strong> {d.decision === "approved" ? "approvata" : "rifiutata"} {d.channel === "agent" ? "in automatico" : `da ${d.by}`}
                   <span className="muted"> · {date(d.at)}</span>
                 </li>
               ))}
@@ -472,9 +481,15 @@ function tickets(db: DatabaseSync, actor: Actor, personId: string, name: string)
             )}
             {t.downloads.length === 0 && !t.outcome && <span className="muted small">Nessun documento ancora.</span>}
           </div>
-          {t.status === "pending_finance" && (
+          {t.canApprove && (
             <div className="item-actions">
-              <ActionButton label="Approva rimborso" kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${t.id}/finance`} body={{ actorId: actor.id }} />
+              <ActionButton
+                label={t.status === "in_review" ? "Approva dopo revisione" : "Approva rimborso"}
+                kind="success"
+                icon={<IconCheck size={15} />}
+                url={`/api/requests/${t.id}/finance`}
+                body={{ actorId: actor.id }}
+              />
             </div>
           )}
         </article>

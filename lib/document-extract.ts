@@ -12,6 +12,8 @@ export interface ExtractedDocument {
   vatNumber: string | null;
   buyerVatNumber: string | null;
   paymentMethod: "card" | "cash" | "unknown";
+  cardLast4: string | null;
+  transactionRef: string | null;
 }
 
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
@@ -67,7 +69,9 @@ const PROMPT =
   "- docDate: data del documento in formato ISO YYYY-MM-DD\n" +
   "- vatNumber: partita IVA dell'esercente\n" +
   "- buyerVatNumber: partita IVA o codice fiscale dell'acquirente, se presente\n" +
-  '- paymentMethod: "cash" (contanti), "card" (carta) oppure "unknown"';
+  '- paymentMethod: "cash" (contanti), "card" (carta) oppure "unknown"\n' +
+  "- cardLast4: le ultime 4 cifre della carta usata, se stampate (es. \"**** 4242\" -> \"4242\")\n" +
+  "- transactionRef: identificativo della transazione o codice di autorizzazione del pagamento, come stampato";
 
 const str = (v: unknown, field: string): string | null => {
   if (v === null || v === undefined) return null;
@@ -76,6 +80,17 @@ const str = (v: unknown, field: string): string | null => {
   const t = v.trim();
   return t ? t : null;
 };
+
+// Solo 4 cifre finali: «**** 4242», «XXXX4242» o «4242» diventano «4242». Altro -> null.
+function last4(v: string | null): string | null {
+  const digits = v?.match(/(\d{4})\D*$/)?.[1];
+  return digits ?? null;
+}
+
+// Riferimento di transazione confrontabile: maiuscolo, senza spazi né separatori.
+export function normalizeRef(ref: string | null | undefined): string {
+  return (ref ?? "").replace(/[\s\-_.:#\/]/g, "").toUpperCase();
+}
 
 export async function extractDocument(bytes: Uint8Array, mime: string, llm: VisionLlm = geminiVision): Promise<ExtractedDocument> {
   if (!ALLOWED_DOC_MIMES.includes(mime)) throw new Error(`Formato non supportato: ${mime}`);
@@ -93,6 +108,8 @@ export async function extractDocument(bytes: Uint8Array, mime: string, llm: Visi
     vatNumber: str(r.vatNumber, "vatNumber"),
     buyerVatNumber: str(r.buyerVatNumber, "buyerVatNumber"),
     paymentMethod: pay === "card" || pay === "carta" ? "card" : pay === "cash" || pay === "contanti" ? "cash" : "unknown",
+    cardLast4: last4(str(r.cardLast4, "cardLast4")),
+    transactionRef: str(r.transactionRef, "transactionRef")?.slice(0, 100) ?? null,
   };
 }
 
