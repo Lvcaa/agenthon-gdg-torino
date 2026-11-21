@@ -19,7 +19,6 @@ export interface RequestItem {
   category: string;
   amount: string;
   authorized: string;
-  overAuthorized: string;
   budget: string;
   extra: string;
   priority: number;
@@ -30,6 +29,7 @@ export interface RequestItem {
   quote: string | null;
   policyGap: boolean;
   reason: string;
+  justification: string | null;
   funding: string | null;
   verification: string | null;
   financeApprovable: boolean;
@@ -79,6 +79,9 @@ export type CardData =
       clause: string;
       quote: string | null;
       policyGap: boolean;
+      // Supera il budget: per confermare serve la motivazione scritta dal dipendente.
+      needsJustification: boolean;
+      justification: string | null;
     }
   | ({ type: "card" } & CardPanelData)
   | { type: "requests"; items: RequestItem[] }
@@ -175,6 +178,12 @@ function InvoicePopup({ requestId, billing, note }: { requestId: string; billing
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby={`${key}-title`}>
       <div className="modal">
         <h2 id={`${key}-title`}>Ricordati la fattura</h2>
+        <div className="alert-danger" role="alert">
+          <IconAlert size={16} />
+          <span>
+            <strong>Senza fattura la spesa non è detraibile.</strong> Caricala dopo il pagamento, intestata all&apos;azienda con i dati qui sotto.
+          </span>
+        </div>
         <p>
           Per questa spesa chiedi la fattura intestata all&apos;azienda{note ? `. ${note}` : "."}
         </p>
@@ -197,16 +206,41 @@ function InvoicePopup({ requestId, billing, note }: { requestId: string; billing
   );
 }
 
+const toAmountText = (cents: number) => (cents / 100).toFixed(2).replace(".", ",");
+const toCents = (text: string): number | null => {
+  if (!/^\d+(,\d{1,2})?$/.test(text)) return null;
+  const [units, decimals = ""] = text.split(",");
+  return Number(units) * 100 + Number(decimals.padEnd(2, "0"));
+};
+
 function PayForm({ data, actorId }: { data: CardPanelData; actorId: string }) {
   const router = useRouter();
-  const [amount, setAmount] = useState((data.limitCents / 100).toFixed(2).replace(".", ","));
+  const [amount, setAmount] = useState(toAmountText(data.limitCents));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
+  // Si accettano solo cifre e due decimali; un importo oltre il tetto viene riportato al tetto.
+  function change(value: string) {
+    const clean = value.replace(".", ",");
+    if (!/^\d*(,\d{0,2})?$/.test(clean)) return;
+    const cents = toCents(clean);
+    if (cents !== null && cents > data.limitCents) {
+      setAmount(toAmountText(data.limitCents));
+      setMessage(`Non puoi pagare più del tetto di ${data.limit}`);
+      return;
+    }
+    setAmount(clean);
+    setMessage("");
+  }
+
   async function pay() {
-    const cents = Math.round(Number(amount.replace(",", ".")) * 100);
-    if (!Number.isInteger(cents) || cents <= 0) {
+    const cents = toCents(amount);
+    if (cents === null || cents <= 0) {
       setMessage("Importo non valido");
+      return;
+    }
+    if (cents > data.limitCents) {
+      setMessage(`Non puoi pagare più del tetto di ${data.limit}`);
       return;
     }
     setBusy(true);
@@ -222,8 +256,9 @@ function PayForm({ data, actorId }: { data: CardPanelData; actorId: string }) {
     <div className="pay-row">
       <label className="money">
         <span>€</span>
-        <input className="amount-input" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy} aria-label="Importo" />
+        <input className="amount-input" inputMode="decimal" value={amount} onChange={(e) => change(e.target.value)} disabled={busy} aria-label={`Importo, massimo ${data.limit}`} />
       </label>
+      <span className="muted small">massimo {data.limit}</span>
       <button className="primary" disabled={busy} onClick={pay}>
         Paga con la carta (sandbox)
       </button>
@@ -373,6 +408,55 @@ function Ledger({ rows }: { rows: { label: string; value: string; key?: boolean 
   );
 }
 
+const JUSTIFICATION_MIN = 10;
+const JUSTIFICATION_MAX = 500;
+
+// Conferma di una richiesta oltre il budget: la motivazione è obbligatoria e accompagna la pratica fino al report di Finance.
+function JustifiedConfirm({ actorId, messageId, extra }: { actorId: string; messageId: number; extra: string }) {
+  const router = useRouter();
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const length = text.trim().length;
+  const ready = length >= JUSTIFICATION_MIN && length <= JUSTIFICATION_MAX;
+
+  async function send() {
+    setBusy(true);
+    setMessage("");
+    const { ok, data } = await post("/api/chat/confirm", { actorId, messageId, justification: text });
+    setBusy(false);
+    if (!ok) setMessage(String(data.error ?? "Errore"));
+    router.refresh();
+  }
+
+  return (
+    <div className="justify">
+      <label htmlFor={`why-${messageId}`}>
+        <strong>Perché ti serve la deroga di {extra}?</strong>
+        <span className="muted small"> La leggono il manager e Finance.</span>
+      </label>
+      <textarea
+        id={`why-${messageId}`}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        maxLength={JUSTIFICATION_MAX}
+        rows={3}
+        placeholder="Es. la fiera finisce tardi e non ci sono mezzi pubblici per l'hotel"
+        disabled={busy}
+      />
+      <div className="justify-foot">
+        <span className="muted small">
+          {length < JUSTIFICATION_MIN ? `Almeno ${JUSTIFICATION_MIN} caratteri` : `${length}/${JUSTIFICATION_MAX}`}
+        </span>
+        <button className="primary" disabled={!ready || busy} onClick={send}>
+          Conferma
+        </button>
+      </div>
+      {message && <span className="error">{message}</span>}
+    </div>
+  );
+}
+
 function Card({ card, actorId, permission }: { card: CardData; actorId: string; permission: string }) {
   if (card.type === "proposal") {
     return (
@@ -408,13 +492,15 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
             <span className="ok">
               <IconCheck size={15} /> Inviata · {card.confirmedStatus}
             </span>
-          ) : (
+          ) : card.needsJustification ? null : (
             <>
               <span className="muted small">Parte solo quando confermi.</span>
               <ActionButton label="Conferma" kind="primary" url="/api/chat/confirm" body={{ actorId, messageId: card.messageId }} />
             </>
           )}
         </div>
+        {card.confirmedStatus && card.justification && <p className="reason justification">Motivazione: «{card.justification}»</p>}
+        {!card.confirmedStatus && card.needsJustification && <JustifiedConfirm actorId={actorId} messageId={card.messageId} extra={card.extra} />}
       </div>
     );
   }
@@ -456,6 +542,7 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
                 <IconAlert size={15} /> La policy non copre questo caso.
               </div>
             )}
+            {r.justification && <p className="reason justification">Motivazione della deroga: «{r.justification}»</p>}
             {permission === "employee" && r.card && r.awaitingDocs && (
               <div className="nested">
                 <CardPanel data={r.card} actorId={actorId} permission={permission} />
@@ -472,8 +559,7 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
                 )}
                 {permission === "employee" && r.awaitingDocs && (
                   <>
-                    <ActionButton label={`Ricevuta ${r.overAuthorized}`} icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "over" }} />
-                    <ActionButton label={`Ricevuta ${r.authorized}`} kind="primary" icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "exact" }} />
+                    <ActionButton label="Invia" kind="primary" icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "exact" }} />
                   </>
                 )}
                 {permission === "finance" && ["pending_finance", "finance_approved", "exported"].includes(r.status) && (

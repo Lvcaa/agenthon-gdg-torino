@@ -15,6 +15,8 @@ import {
   cardView,
   confirmProposal,
   decide,
+  decideSuggestion,
+  listSuggestions,
   exportCsv,
   financeApprove,
   issueCard,
@@ -28,6 +30,7 @@ import {
 import { fakeStripe, settleCard } from "./helpers/fake-stripe.ts";
 
 const [anna, marco, giulia, paolo] = DEMO_USERS.map((u) => u.id);
+const WHY = "Fiera fino a tardi, niente mezzi pubblici";
 
 const TAXI_QUOTE =
   "Il budget taxi per ogni trasferta è di 30 euro per i junior, 60 euro per i senior, 100 euro per i lead e 150 euro per i director.";
@@ -61,7 +64,7 @@ const rejectsWith = (status: number, promise: Promise<unknown>) =>
 async function submit(db: Db, userId: string, proposal: object = taxi(), now?: Date) {
   await agentTurn(db, userId, "Mi serve un taxi", answer(proposal));
   const messages = listMessages(db, userId).filter((m) => m.card && JSON.parse(m.card).type === "proposal");
-  return confirmProposal(db, userId, messages.at(-1)!.id, now).request;
+  return confirmProposal(db, userId, messages.at(-1)!.id, WHY, now).request;
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -192,19 +195,46 @@ test("a rejected waiver with no residual means no reimbursement", async (t) => {
   assert.match(lastMessage(db, anna).content, /nessun rimborso/i);
 });
 
-test("a payment above the card limit is declined", async (t) => {
+test("a payment above the card limit is refused before reaching the provider", async (t) => {
   const db = setup(t);
   const stripe = fakeStripe();
   const sent = await submit(db, anna);
   decide(db, giulia, sent.id, "approved");
   await issueCard(db, stripe, sent.id);
 
-  const declined = await payWithCard(db, stripe, anna, sent.id, 4201);
+  await rejectsWith(409, payWithCard(db, stripe, anna, sent.id, 4201));
+  assert.ok(!stripe.calls.some((c) => c.method === "simulatePayment"), "il provider non viene chiamato");
+  assert.equal(count(db, "SELECT COUNT(*) AS count FROM card_transactions"), 0);
+  assert.equal((cardOf(db, sent.id) as any).status, "active");
+
+  // meno del tetto è ammesso
+  const less = await payWithCard(db, stripe, anna, sent.id, 4000);
+  assert.equal(less.approved, true);
+  assert.equal(db.prepare("SELECT amount_cents FROM card_transactions").get()?.amount_cents, 4000);
+});
+
+test("a payment declined by the provider is logged", async (t) => {
+  const db = setup(t);
+  const stripe = fakeStripe();
+  const sent = await submit(db, anna);
+  decide(db, giulia, sent.id, "approved");
+  await issueCard(db, stripe, sent.id);
+  // la carta risulta bloccata dal provider: il rifiuto arriva da lì, non dal server
+  for (const card of stripe.cards.values()) card.status = "inactive";
+
+  const declined = await payWithCard(db, stripe, anna, sent.id);
   assert.equal(declined.approved, false);
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM card_transactions"), 0);
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM events WHERE type = 'card_payment_declined'"), 1);
-  assert.equal((cardOf(db, sent.id) as any).status, "active");
   assert.match(lastMessage(db, anna).content, /rifiutato/);
+});
+
+test("a payment at the cap is captured and deactivates the card", async (t) => {
+  const db = setup(t);
+  const stripe = fakeStripe();
+  const sent = await submit(db, anna);
+  decide(db, giulia, sent.id, "approved");
+  await issueCard(db, stripe, sent.id);
 
   const paid = await payWithCard(db, stripe, anna, sent.id);
   assert.equal(paid.approved, true);
@@ -503,4 +533,51 @@ test("assertCanAttach checks owner, state and kind before any extraction", async
   assert.equal(assertCanAttach(db, anna, sent.id, "receipt").id, sent.id);
   attachDocument(db, anna, sent.id, doc("receipt", 4200));
   expectError(409, () => assertCanAttach(db, anna, sent.id, "receipt"));
+});
+
+test("the third approved exception on the same expense suggests a policy change to Finance", async (t) => {
+  const db = setup(t);
+  const stripe = fakeStripe();
+  const exception = async (userId: string, amountCents: number) => {
+    const sent = await submit(db, userId, taxi({ amountCents, limitCents: userId === anna ? 3000 : 6000 }));
+    assert.ok(sent.extra_cents > 0, "è una deroga");
+    decide(db, giulia, sent.id, "approved");
+    await settleCard(db, stripe, userId, sent.id);
+    assert.equal(attachReceipt(db, anna === userId ? anna : userId, sent.id, "exact").status, "finance_approved");
+    return sent;
+  };
+
+  await exception(anna, 4200);
+  await exception(marco, 7000);
+  assert.deepEqual(listSuggestions(db, paolo), [], "due deroghe non bastano");
+
+  // una pratica entro il residuo non è una deroga e non conta
+  const within = await submit(db, marco, taxi({ amountCents: 1000, limitCents: 10000 }));
+  assert.equal(within.extra_cents, 0);
+
+  const third = await exception(anna, 2500);
+  const [suggestion] = listSuggestions(db, paolo);
+  assert.equal(suggestion.category, "taxi");
+  assert.equal(suggestion.exceptions, 3);
+  assert.equal(suggestion.status, "open");
+  // deroghe da 12, 10 e 25 €: media 15,67 €, arrotondata per eccesso a 20 €
+  assert.equal(suggestion.avg_extra_cents, 1567);
+  assert.equal(suggestion.increase_cents, 2000);
+  assert.equal(count(db, "SELECT COUNT(*) AS count FROM events WHERE type = 'policy_suggestion'"), 1);
+  assert.ok(third);
+
+  expectError(403, () => listSuggestions(db, giulia));
+  expectError(403, () => decideSuggestion(db, anna, suggestion.id, "accepted"));
+  expectError(400, () => decideSuggestion(db, paolo, suggestion.id, "maybe"));
+  expectError(404, () => decideSuggestion(db, paolo, 999, "accepted"));
+  assert.equal(decideSuggestion(db, paolo, suggestion.id, "accepted").duplicate, false);
+  assert.equal(decideSuggestion(db, paolo, suggestion.id, "dismissed").duplicate, true);
+  assert.equal(listSuggestions(db, paolo)[0].status, "accepted");
+
+  // dopo la decisione non si ripropone
+  await exception(marco, 6500);
+  assert.equal(listSuggestions(db, paolo)[0].exceptions, 3);
+
+  resetDemo(db);
+  assert.deepEqual(listSuggestions(db, paolo), []);
 });

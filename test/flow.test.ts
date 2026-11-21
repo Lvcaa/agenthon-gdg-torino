@@ -13,6 +13,7 @@ import {
   createLinkCode,
   decide,
   exportCsv,
+  ticketData,
   attachDocument,
   financeApprove,
   listMessages,
@@ -25,8 +26,10 @@ import { uploadPolicyPdf } from "../lib/policy-upload.ts";
 import { fakeStripe, settleCard } from "./helpers/fake-stripe.ts";
 import { makePdf } from "./helpers/pdf.ts";
 import { verifyProposal } from "../lib/proposal.ts";
+import { buildTicketPdf } from "../lib/ticket-pdf.ts";
 
 const [anna, marco, giulia, paolo] = DEMO_USERS.map((u) => u.id);
+const WHY = "Fiera fino a tardi, niente mezzi pubblici";
 
 // Citazioni copiate dalla policy: il server le cerca nel testo.
 const TAXI_QUOTE =
@@ -69,7 +72,7 @@ async function requestAndConfirm(db: Db, userId: string, proposal: object = taxi
   await agentTurn(db, userId, "Mi serve un taxi", answer(proposal));
   const message = lastProposalMessage(db, userId);
   assert.ok(message, "nessuna proposta in chat");
-  return confirmProposal(db, userId, message.id).request;
+  return confirmProposal(db, userId, message.id, WHY).request;
 }
 
 const count = (db: Db, sql: string) => db.prepare(sql).get()?.count;
@@ -86,7 +89,7 @@ test("the 42 EUR taxi goes from chat to CSV", async (t) => {
   assert.equal(card.proposal.clauseRef, "2. Trasporti locali (taxi) (p. 1)");
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM requests"), 0, "la proposta non crea ancora una pratica");
 
-  const sent = confirmProposal(db, anna, message.id).request;
+  const sent = confirmProposal(db, anna, message.id, WHY).request;
   assert.equal(sent.status, "pending_manager");
   assert.equal(sent.clause_quote, TAXI_QUOTE);
   assert.equal(sent.policy_version, readPolicy(db).version);
@@ -100,7 +103,7 @@ test("the 42 EUR taxi goes from chat to CSV", async (t) => {
   const { csv } = exportCsv(db, paolo, sent.id);
   const [header, line] = csv.trim().split("\n");
   assert.match(header, /^request_id,trip_id,employee,category,amount_cents,amount_eur/);
-  assert.match(line, /,T-042,Anna Rossi,taxi,4200,42\.00,R-[0-9A-F]{8},Giulia Verdi,Agente di verifica,[0-9a-f]{8},2\. Trasporti locali \(taxi\) \(p\. 1\),card,0,ipi_fake_\d+$/);
+  assert.match(line, /,T-042,Anna Rossi,taxi,4200,42\.00,R-[0-9A-F]{8},Giulia Verdi,Agente di verifica,[0-9a-f]{8},2\. Trasporti locali \(taxi\) \(p\. 1\),"Fiera fino a tardi, niente mezzi pubblici",card,0,ipi_fake_\d+$/);
   assert.equal(listRequests(db)[0].status, "exported");
 
   const types = db.prepare("SELECT type FROM events ORDER BY id").all().map((e) => e.type);
@@ -196,11 +199,11 @@ test("only an employee gets a proposal and only the owner can confirm it", async
 
   await agentTurn(db, anna, "Taxi da 42", answer(taxi()));
   const message = lastProposalMessage(db, anna);
-  expectError(404, () => confirmProposal(db, marco, message.id));
-  expectError(403, () => confirmProposal(db, giulia, message.id));
+  expectError(404, () => confirmProposal(db, marco, message.id, WHY));
+  expectError(403, () => confirmProposal(db, giulia, message.id, WHY));
   expectError(401, () => confirmProposal(db, "unknown", message.id));
-  expectError(404, () => confirmProposal(db, anna, 99999));
-  expectError(404, () => confirmProposal(db, anna, listMessages(db, anna)[0].id));
+  expectError(404, () => confirmProposal(db, anna, 99999, WHY));
+  expectError(404, () => confirmProposal(db, anna, listMessages(db, anna)[0].id, WHY));
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM requests"), 0);
 });
 
@@ -208,8 +211,8 @@ test("confirming twice creates one request", async (t) => {
   const db = setup(t);
   await agentTurn(db, anna, "Taxi da 42", answer(taxi()));
   const message = lastProposalMessage(db, anna);
-  const first = confirmProposal(db, anna, message.id);
-  const second = confirmProposal(db, anna, message.id);
+  const first = confirmProposal(db, anna, message.id, WHY);
+  const second = confirmProposal(db, anna, message.id, WHY);
   assert.equal(first.duplicate, false);
   assert.equal(second.duplicate, true);
   assert.equal(second.request.id, first.request.id);
@@ -223,7 +226,7 @@ test("a tampered proposal is not accepted at confirmation", async (t) => {
   const card = JSON.parse(message.card!);
   card.proposal.limitCents = 99900;
   db.prepare("UPDATE chat_messages SET card = ? WHERE id = ?").run(JSON.stringify(card), message.id);
-  expectError(409, () => confirmProposal(db, anna, message.id));
+  expectError(409, () => confirmProposal(db, anna, message.id, WHY));
   assert.equal(count(db, "SELECT COUNT(*) AS count FROM requests"), 0);
 });
 
@@ -523,7 +526,7 @@ test("a pending proposal is refused if the policy changes before confirmation", 
   await agentTurn(db, anna, "Taxi da 42", answer(taxi()));
   const message = lastProposalMessage(db, anna);
   await uploadPolicyPdf(db, paolo, { name: "p.pdf", bytes: makePdf(pdfPolicy) }, dir);
-  expectError(409, () => confirmProposal(db, anna, message.id));
+  expectError(409, () => confirmProposal(db, anna, message.id, WHY));
 });
 
 test("when the model reports a gap, the search is widened once", async (t) => {
@@ -554,4 +557,42 @@ test("the prompt carries the index and excerpts, not the whole document", async 
   assert.match(system, /INDICE/);
   assert.match(system, /ESTRATTI PERTINENTI/);
   assert.match(system, /\[S\d+ · p\. 1 · 2\. Trasporti locali \(taxi\)\]/);
+});
+
+test("asking for a waiver requires a written justification that follows the request", async (t) => {
+  const db = setup(t);
+  await agentTurn(db, anna, "Mi serve un taxi", answer(taxi()));
+  const message = listMessages(db, anna).filter((m) => m.card && JSON.parse(m.card).type === "proposal").at(-1)!;
+
+  // 42 € con 30 € di residuo: deroga di 12 €, la motivazione è obbligatoria
+  expectError(400, () => confirmProposal(db, anna, message.id));
+  expectError(400, () => confirmProposal(db, anna, message.id, "   corto  "));
+  expectError(400, () => confirmProposal(db, anna, message.id, "x".repeat(501)));
+  expectError(400, () => confirmProposal(db, anna, message.id, { text: WHY }));
+  assert.equal(count(db, "SELECT COUNT(*) AS count FROM requests"), 0, "senza motivazione non nasce la pratica");
+
+  const sent = confirmProposal(db, anna, message.id, `  ${WHY}  `).request;
+  assert.equal(sent.justification, WHY, "spazi normalizzati");
+  assert.match(listMessages(db, giulia).at(-1)!.content, /Motivazione: «Fiera fino a tardi, niente mezzi pubblici»/);
+  assert.match(String(db.prepare("SELECT payload FROM events WHERE type = 'request_submitted'").get()?.payload), /Fiera fino a tardi/);
+
+  decide(db, giulia, sent.id, "approved");
+  await settleCard(db, fakeStripe(), anna, sent.id);
+  attachReceipt(db, anna, sent.id, "exact");
+  assert.match(listMessages(db, paolo).at(-1)!.content, /approvata in automatico.*Deroga motivata: «Fiera fino a tardi/);
+  const ticket = ticketData(db, paolo, sent.id);
+  assert.equal(ticket.request.justification, WHY);
+  assert.ok(ticket.verification?.checks?.every((c) => c.ok));
+  const pdf = await buildTicketPdf(ticket);
+  assert.ok(pdf.length > 0);
+  assert.match(exportCsv(db, paolo, sent.id).csv, /"Fiera fino a tardi, niente mezzi pubblici"/);
+});
+
+test("a request within the budget needs no justification", async (t) => {
+  const db = setup(t);
+  await agentTurn(db, anna, "Taxi breve", answer(taxi({ amountCents: 2000 })));
+  const message = listMessages(db, anna).filter((m) => m.card && JSON.parse(m.card).type === "proposal").at(-1)!;
+  const sent = confirmProposal(db, anna, message.id).request;
+  assert.equal(sent.status, "approved");
+  assert.equal(sent.justification, null);
 });

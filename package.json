@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "policy:pdf": "node scripts/make-policy-pdf.ts",
-    "docs:sample": "node scripts/make-sample-docs.ts"
+    "docs:sample": "node scripts/make-sample-docs.ts",
+    "demo:suggestion": "node scripts/demo-suggestion.ts"
   },
   "dependencies": {
     "next": "^16.0.0",

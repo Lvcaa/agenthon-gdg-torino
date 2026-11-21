@@ -13,6 +13,7 @@ export interface TicketData {
     status: string;
     funding: "card" | "personal" | null;
     reason: string | null;
+    justification?: string | null;
     policyQuote: string | null;
     policyVersion: string | null;
   };
@@ -40,7 +41,13 @@ export interface TicketData {
     path: string | null;
     mime: string | null;
   }[];
-  verification: { outcome: string; receiptCents: number | null; reimbursedCents: number | null } | null;
+  verification: {
+    outcome: string;
+    receiptCents: number | null;
+    reimbursedCents: number | null;
+    // Controlli della riconciliazione dell'agente di verifica.
+    checks?: { ok: boolean; detail: string }[];
+  } | null;
   company: { name: string; vatNumber: string; sdiCode: string; pec: string; address: string };
 }
 
@@ -201,7 +208,8 @@ export async function buildTicketPdf(data: TicketData, readFile: ReadFile = fsRe
   w.kv("Autorizzato", eur(r.authorizedCents));
   w.kv("Stato", r.status);
   w.kv("Pagamento", r.funding === "card" ? "carta virtuale monouso" : r.funding === "personal" ? "carta personale con rimborso" : "non specificato");
-  if (r.reason) w.kv("Motivazione", r.reason);
+  if (r.reason) w.kv("Descrizione", r.reason);
+  if (r.extraCents > 0) w.kv("Motivazione della deroga", r.justification ? `"${r.justification}"` : "non indicata");
   if (r.policyQuote) w.kv("Policy", `"${r.policyQuote}"${r.policyVersion ? ` (versione ${r.policyVersion})` : ""}`);
   w.y -= 6;
 
@@ -228,6 +236,7 @@ export async function buildTicketPdf(data: TicketData, readFile: ReadFile = fsRe
     w.kv("Esito", data.verification.outcome);
     w.kv("Importo documento", eur(data.verification.receiptCents));
     w.kv("Rimborso", data.verification.reimbursedCents == null ? "-" : eur(data.verification.reimbursedCents));
+    for (const c of data.verification.checks ?? []) w.text(`${c.ok ? "[ok]" : "[no]"} ${c.detail}`, { indent: 16 });
   } else w.text("Verifica non ancora eseguita.", { indent: 8 });
   if (data.card) w.kv("Carta", `**** ${data.card.last4}, limite ${eur(data.card.limitCents)}`);
 

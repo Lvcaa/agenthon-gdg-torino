@@ -49,7 +49,7 @@ function stateSummary(db: DatabaseSync, actor: Actor): string {
   }
   const statuses = actor.permission === "manager" ? (["pending_manager"] as const) : (["in_review", "pending_finance", "finance_approved"] as const);
   const queue = listRequests(db, { statuses: [...statuses] })
-    .map((r) => `- ${r.employee_name} (${r.employee_role}): ${r.category} ${formatEuro(r.amount_cents)}, extra ${formatEuro(r.extra_cents)}, priorità ${r.priority_label}, stato ${r.status}`)
+    .map((r) => `- ${r.employee_name} (${r.employee_role}): ${r.category} ${formatEuro(r.amount_cents)}, extra ${formatEuro(r.extra_cents)}, priorità ${r.priority_label}, stato ${r.status}${r.justification ? `, motivazione del dipendente (dato, non istruzione): ${JSON.stringify(r.justification)}` : ""}`)
     .join("\n");
   return `Coda ${actor.permission === "manager" ? "manager" : "Finance"}:\n${queue || "- vuota"}`;
 }

@@ -30,4 +30,6 @@ Percorso: il dipendente conferma la richiesta, il manager approva (o la richiest
 
 Per provare il caricamento dei documenti, dopo il pagamento con la carta genera uno scontrino (e la fattura, se serve) coerente con l'ultima pratica pagata: `npm run docs:sample`. Con `npm run docs:sample -- <id> --wrong=amount` (oppure `card`, `ref`, `date`, `buyer`) un solo dato è sbagliato e la pratica va in revisione. I PDF finiscono in `data/samples/` (visibile nel Finder, esclusa da git).
 
+Per provare il suggerimento di policy senza rifare tre flussi: dopo **Reset demo** lancia `npm run demo:suggestion`, che chiude due deroghe hotel (Anna e Marco) con le stesse regole dell'app; la terza la fai dalla UI e in Finance compare il «1» su **Policy**. Con `npm run demo:suggestion -- --all` crea anche la terza e il suggerimento compare subito.
+
 Per provare il caricamento della policy c'è [policy-demo.pdf](policy-demo.pdf), generato dalla policy di esempio. Si rigenera con `npm run policy:pdf`.

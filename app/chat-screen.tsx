@@ -4,7 +4,6 @@ import { Chat, ResetButton, type CardData, type CardPanelData, type MessageData,
 import { DEMO_TRIP_ID, openDatabase } from "../lib/db";
 import { formatEuro } from "../lib/format";
 import {
-  RECEIPT_OVER_CENTS,
   canFinanceApprove,
   cardView,
   checksOf,
@@ -141,7 +140,6 @@ function toItem(db: DatabaseSync, r: RequestView): RequestItem {
     category: CATEGORY_LABEL[r.category],
     amount: formatEuro(r.amount_cents),
     authorized: formatEuro(r.authorized_cents ?? r.amount_cents),
-    overAuthorized: formatEuro((r.authorized_cents ?? r.amount_cents) + RECEIPT_OVER_CENTS),
     budget: formatEuro(r.budget_cents),
     extra: formatEuro(r.extra_cents),
     priority: r.priority,
@@ -157,6 +155,7 @@ function toItem(db: DatabaseSync, r: RequestView): RequestItem {
     quote: r.clause_quote,
     policyGap: r.policy_gap === 1,
     reason: r.reason,
+    justification: r.justification,
   };
 }
 
@@ -181,7 +180,18 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
     activeVersion = readPolicy(db).version;
     ({ users, actor } = resolveActor(db, permission, as));
 
-    messages = listMessages(db, actor.id).map((m) => {
+    const rows = listMessages(db, actor.id);
+    // Carta e caricamento dei documenti stanno solo sull'ultimo messaggio che riguarda la pratica:
+    // i messaggi precedenti restano come storico, senza controlli duplicati.
+    const latestFor = new Map<string, number>();
+    for (const m of rows) {
+      const card = m.card ? (JSON.parse(m.card) as Card) : null;
+      const ids = card?.type === "card" ? [card.requestId] : card?.type === "requests" ? card.ids : [];
+      for (const id of ids) latestFor.set(id, m.id);
+    }
+    const isLatest = (requestId: string, messageId: number) => latestFor.get(requestId) === messageId;
+
+    messages = rows.map((m) => {
       const card = m.card ? (JSON.parse(m.card) as Card) : null;
       let data: CardData | null = null;
       if (card?.type === "proposal") {
@@ -200,11 +210,19 @@ export async function ChatScreen({ permission, as, aside }: { permission: Permis
           clause: card.proposal.clauseRef,
           quote: card.proposal.clauseQuote,
           policyGap: card.proposal.policyGap,
+          needsJustification: card.extraCents > 0,
+          justification: confirmed?.justification ?? null,
         };
       } else if (card?.type === "requests") {
-        data = { type: "requests", items: listRequests(db, { ids: card.ids }).map((r) => toItem(db, r)) };
+        data = {
+          type: "requests",
+          items: listRequests(db, { ids: card.ids }).map((r) => {
+            const item = toItem(db, r);
+            return isLatest(r.id, m.id) ? item : { ...item, card: null, awaitingDocs: false };
+          }),
+        };
       } else if (card?.type === "card") {
-        data = { type: "card", ...buildCard(db, card.requestId) };
+        data = isLatest(card.requestId, m.id) ? { type: "card", ...buildCard(db, card.requestId) } : null;
       } else if (card?.type === "events") {
         data = {
           type: "events",

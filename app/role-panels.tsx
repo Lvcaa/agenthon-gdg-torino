@@ -12,10 +12,12 @@ import {
   employeeRequests,
   financePeople,
   financeQueues,
+  financeSuggestions,
   financeTickets,
   parseFinanceQueue,
   type FinanceQueue,
   type FinanceTicket,
+  type SuggestionView,
   managerDecisions,
   managerQueue,
   parseUrgency,
@@ -284,6 +286,11 @@ function pendingList(db: DatabaseSync, actor: Actor, urgency: Urgency | null) {
         </div>
       </dl>
       {r.reason && <p className="reason">«{r.reason}»</p>}
+      {r.justification && (
+        <p className="reason">
+          <strong>Motivazione della deroga:</strong> «{r.justification}»
+        </p>
+      )}
       {r.policy_gap === 1 && (
         <div className="callout">
           <IconAlert size={15} /> Policy non chiara su questo caso.
@@ -329,6 +336,7 @@ function decidedList(db: DatabaseSync, actor: Actor, decision: "approved" | "rej
           {r.channel !== "web" ? ` · ${r.channel}` : ""}
         </span>
       </div>
+      {r.justification && <p className="reason small">«{r.justification}»</p>}
       <div className="muted small">Ora: {statusLabel(db, r)}</div>
     </article>
   ));
@@ -350,6 +358,8 @@ export function FinancePanel({ params }: { params: Params }) {
 }
 
 function financePanel(db: DatabaseSync, actor: Actor, params: Params) {
+  const suggestions = financeSuggestions(db, actor.id);
+  const open = suggestions.filter((s) => s.status === "open").length;
   return (
     <section className="panel">
       <Tabs
@@ -357,10 +367,10 @@ function financePanel(db: DatabaseSync, actor: Actor, params: Params) {
         name="panel"
         items={[
           { value: "expenses", label: "Note spese" },
-          { value: "policy", label: "Policy" },
+          { value: "policy", label: "Policy", count: open > 0 ? open : undefined },
         ]}
       />
-      {params.panel === "policy" ? policyPanel(db, actor) : expensesPanel(db, actor, params)}
+      {params.panel === "policy" ? policyPanel(db, actor, suggestions) : expensesPanel(db, actor, params)}
     </section>
   );
 }
@@ -507,6 +517,11 @@ function ticketCards(db: DatabaseSync, actor: Actor, list: FinanceTicket[], with
               </div>
             )}
           </dl>
+          {t.justification && (
+            <p className="reason">
+              <strong>Motivazione della deroga:</strong> «{t.justification}»
+            </p>
+          )}
           {t.checks.some((c) => !c.ok) && (
             <ul className="trail">
               {t.checks.filter((c) => !c.ok).map((c) => (
@@ -559,10 +574,65 @@ function ticketCards(db: DatabaseSync, actor: Actor, list: FinanceTicket[], with
   );
 }
 
-function policyPanel(db: DatabaseSync, actor: Actor) {
+const SUGGESTION_STATUS: Record<SuggestionView["status"], string> = { open: "Da decidere", accepted: "Accettato", dismissed: "Ignorato" };
+
+// Proposte di modifica della policy nate dalle deroghe ripetute. Le aperte hanno i pulsanti, le altre restano come storico.
+function suggestionsSection(actor: Actor, suggestions: SuggestionView[]) {
+  const open = suggestions.filter((s) => s.status === "open");
+  const decided = suggestions.filter((s) => s.status !== "open");
+  return (
+    <section className="suggestions" aria-labelledby="suggestions-title">
+      <header className="panel-top">
+        <h3 id="suggestions-title" className="section-title">
+          Suggerimenti
+        </h3>
+        {open.length > 0 && <span className="tag p4">{open.length} nuovo{open.length === 1 ? "" : "i"}</span>}
+      </header>
+      {suggestions.length === 0 && (
+        <Empty title="Nessun suggerimento" text="Quando le deroghe approvate si ripetono sulla stessa spesa, qui trovi una proposta di modifica della policy." />
+      )}
+      {open.map((s) => (
+        <article className="item suggestion" key={s.id}>
+          <div className="item-title">
+            <strong>{s.title}</strong>
+            <span>{date(s.updatedAt)}</span>
+          </div>
+          <p className="small">{s.text}</p>
+          <p>
+            <strong>{s.question}</strong>
+          </p>
+          <div className="item-actions">
+            <ActionButton label="Ignora" url={`/api/policy/suggestions/${s.id}`} body={{ actorId: actor.id, decision: "dismissed" }} />
+            <ActionButton
+              label="Accetta"
+              kind="success"
+              icon={<IconCheck size={15} />}
+              url={`/api/policy/suggestions/${s.id}`}
+              body={{ actorId: actor.id, decision: "accepted" }}
+            />
+          </div>
+        </article>
+      ))}
+      {decided.length > 0 && (
+        <ul className="trail">
+          {decided.map((s) => (
+            <li key={s.id} className={s.status === "accepted" ? "ok" : "no"}>
+              <strong>{s.title}:</strong> {SUGGESTION_STATUS[s.status].toLowerCase()}
+              {s.decidedBy ? ` da ${s.decidedBy}` : ""}
+              {s.status === "accepted" ? " · carica il PDF aggiornato per applicarlo" : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function policyPanel(db: DatabaseSync, actor: Actor, suggestions: SuggestionView[]) {
   const policy = readPolicy(db);
   return (
     <>
+      {suggestionsSection(actor, suggestions)}
       <div className="panel-head">
         <h2>Policy aziendale</h2>
         <p className="muted small">È il testo che l&apos;assistente cita in ogni risposta.</p>

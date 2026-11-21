@@ -20,6 +20,7 @@ import {
 import { fakeStripe, settleCard } from "./helpers/fake-stripe.ts";
 
 const [anna, marco, giulia, paolo] = DEMO_USERS.map((u) => u.id);
+const WHY = "Fiera fino a tardi, niente mezzi pubblici";
 
 const TAXI_QUOTE =
   "Il budget taxi per ogni trasferta è di 30 euro per i junior, 60 euro per i senior, 100 euro per i lead e 150 euro per i director.";
@@ -49,7 +50,7 @@ type Db = ReturnType<typeof setup>;
 async function submit(db: Db, userId: string, proposal: object) {
   await agentTurn(db, userId, "Mi serve un taxi", answer(proposal));
   const message = listMessages(db, userId).filter((m) => m.card && JSON.parse(m.card).type === "proposal").at(-1)!;
-  return confirmProposal(db, userId, message.id).request;
+  return confirmProposal(db, userId, message.id, WHY).request;
 }
 
 function expectError(status: number, fn: () => unknown) {

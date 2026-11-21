@@ -5,6 +5,8 @@ import { EXPENSE_CATEGORIES } from "./categories.ts";
 import { seedPolicy } from "./policy.ts";
 
 export const DEMO_TRIP_ID = "T-042";
+// Trasferta sintetica: destinazione ed evento compaiono nei suggerimenti di policy per Finance.
+export const DEMO_TRIP = { id: DEMO_TRIP_ID, destination: "Roma", event: "Fiera" } as const;
 
 // Posizioni (seniority). I limiti di spesa non sono nel database: li legge l'agente dalla policy.
 export const DEMO_ROLES = [
@@ -28,7 +30,9 @@ const SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS trips (
     id TEXT PRIMARY KEY,
-    remaining_budget_cents INTEGER NOT NULL CHECK (remaining_budget_cents >= 0)
+    remaining_budget_cents INTEGER NOT NULL CHECK (remaining_budget_cents >= 0),
+    destination TEXT,
+    event TEXT
   ) STRICT;
 
   CREATE TABLE IF NOT EXISTS roles (
@@ -119,6 +123,8 @@ const SCHEMA = `
     policy_version TEXT NOT NULL,
     clause_id TEXT NOT NULL,
     reason TEXT NOT NULL,
+    -- Motivazione scritta dal dipendente quando chiede una deroga (extra > 0). Vuota se la spesa rientra nel budget.
+    justification TEXT,
     funding TEXT CHECK (funding IN ('card', 'personal')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -200,6 +206,24 @@ const SCHEMA = `
     UNIQUE (request_id, kind)
   ) STRICT;
 
+  -- Suggerimenti di policy per Finance: deroghe approvate che si ripetono sulla stessa categoria e trasferta.
+  -- Uno per (trasferta, categoria): open finché Finance non lo accetta o lo ignora.
+  CREATE TABLE IF NOT EXISTS policy_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id TEXT NOT NULL REFERENCES trips (id),
+    category TEXT NOT NULL,
+    exceptions INTEGER NOT NULL CHECK (exceptions > 0),
+    avg_extra_cents INTEGER NOT NULL CHECK (avg_extra_cents >= 0),
+    increase_cents INTEGER NOT NULL CHECK (increase_cents > 0),
+    window_days INTEGER NOT NULL CHECK (window_days > 0),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'accepted', 'dismissed')),
+    decided_by TEXT REFERENCES roles_and_users (id),
+    decided_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (trip_id, category)
+  ) STRICT;
+
   -- Registro: append-only, un evento per ogni passaggio della pratica.
   CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -216,8 +240,9 @@ const SCHEMA = `
 
 function seed(db: DatabaseSync) {
   db.prepare(
-    "INSERT INTO trips (id, remaining_budget_cents) VALUES (?, ?) ON CONFLICT (id) DO NOTHING",
-  ).run(DEMO_TRIP_ID, 3000);
+    `INSERT INTO trips (id, remaining_budget_cents, destination, event) VALUES (?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET destination = excluded.destination, event = excluded.event`,
+  ).run(DEMO_TRIP_ID, 3000, DEMO_TRIP.destination, DEMO_TRIP.event);
 
   const upsertRole = db.prepare(
     "INSERT INTO roles (role, description) VALUES (?, ?) ON CONFLICT (role) DO UPDATE SET description = excluded.description",
@@ -256,6 +281,7 @@ function migrate(db: DatabaseSync) {
     );
   }
   if (!requestColumns.includes("clause_quote")) db.exec("ALTER TABLE requests ADD COLUMN clause_quote TEXT");
+  if (!requestColumns.includes("justification")) db.exec("ALTER TABLE requests ADD COLUMN justification TEXT");
   if (!requestColumns.includes("policy_gap")) {
     db.exec("ALTER TABLE requests ADD COLUMN policy_gap INTEGER NOT NULL DEFAULT 0 CHECK (policy_gap IN (0, 1))");
   }
@@ -272,6 +298,10 @@ function migrate(db: DatabaseSync) {
   if (!columns("roles_and_users").includes("stripe_cardholder_id")) {
     db.exec("ALTER TABLE roles_and_users ADD COLUMN stripe_cardholder_id TEXT");
   }
+
+  const tripColumns = columns("trips");
+  if (!tripColumns.includes("destination")) db.exec("ALTER TABLE trips ADD COLUMN destination TEXT");
+  if (!tripColumns.includes("event")) db.exec("ALTER TABLE trips ADD COLUMN event TEXT");
 
   // La cartella dei dati era .data (nascosta nel Finder): i percorsi salvati puntano ora a data/.
   db.exec("UPDATE documents SET path = 'data/' || substr(path, 7) WHERE path LIKE '.data/%'");

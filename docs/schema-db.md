@@ -11,6 +11,7 @@ Trasferta e budget residuo.
 |---|---|---|
 | **id** | TEXT | **PK** (es. `T-042`) |
 | remaining_budget_cents | INTEGER | ≥ 0 |
+| destination, event | TEXT | destinazione ed evento della trasferta (T-042: Roma, Fiera) |
 
 ### `roles`
 Posizioni lavorative (seniority). I limiti di spesa non sono nel database: sono scritti nella policy in testo libero (`fixtures/policy.md`) e li legge l'agente.
@@ -101,8 +102,27 @@ La pratica che attraversa tutto il flusso. Nasce quando il dipendente conferma l
 | policy_gap | INTEGER | 1 se la policy non copre il caso e decide il manager |
 | policy_version | TEXT | impronta del testo della policy (8 caratteri) |
 | clause_id | TEXT | titolo della sezione della policy, es. `2. Trasporti locali (taxi)` |
-| reason | TEXT | motivazione |
+| reason | TEXT | descrizione della spesa, estratta dal modello |
+| justification | TEXT | motivazione della deroga scritta dal dipendente, obbligatoria se extra > 0 |
 | created_at, updated_at | TEXT | |
+
+### `policy_suggestions`
+Proposte di modifica della policy per Finance, nate dalle deroghe ripetute.
+
+| Attributo | Tipo | Note |
+|---|---|---|
+| **id** | INTEGER | **PK**, autoincrement |
+| trip_id | TEXT | **FK** → `trips.id` |
+| category | TEXT | categoria di spesa |
+| exceptions | INTEGER | deroghe contate nella finestra |
+| avg_extra_cents | INTEGER | extra medio |
+| increase_cents | INTEGER | aumento proposto |
+| window_days | INTEGER | finestra in giorni |
+| status | TEXT | `open`, `accepted`, `dismissed` |
+| decided_by, decided_at | TEXT | Finance che ha deciso |
+| created_at, updated_at | TEXT | |
+
+Vincolo `UNIQUE (trip_id, category)`.
 
 ### `approvals`
 Decisioni su una pratica.

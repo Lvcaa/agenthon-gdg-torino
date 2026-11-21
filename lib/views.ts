@@ -6,15 +6,18 @@ import {
   canFinanceApprove,
   cardView,
   checksOf,
+  listSuggestions,
   getActor,
   listRequests,
   type DocumentKind,
   type DocumentRow,
+  type PolicySuggestionRow,
   type ReconCheck,
   type ReceiptOutcome,
   type RequestView,
   type Status,
 } from "./flow.ts";
+import { formatEuro } from "./format.ts";
 import { URGENCIES, type Urgency } from "./proposal.ts";
 import type { TicketData } from "./ticket-pdf.ts";
 
@@ -270,4 +273,42 @@ export function documentDownload(db: DatabaseSync, actorId: unknown, requestId: 
   if (!path) return { type: "summary", document: summary };
   const short = v.request.id.slice(0, 8);
   return { type: "file", path, mime: d.mime!, filename: `${kind === "invoice" ? "fattura" : "scontrino"}-${short}.${EXT[d.mime!] ?? "bin"}`, fallback: summary };
+}
+
+// --- Finance: suggerimenti di policy ---
+
+const ON_CATEGORY: Record<string, string> = { hotel: "sugli hotel", taxi: "sui taxi", train: "sui treni", meals: "sui pasti", other: "sulle altre spese" };
+const LIMIT_OF: Record<string, string> = { hotel: "hotel", taxi: "taxi", train: "treni", meals: "pasti", other: "altre spese" };
+const ORDINAL = ["", "Prima", "Seconda", "Terza", "Quarta", "Quinta", "Sesta", "Settima", "Ottava", "Nona", "Decima"];
+
+export interface SuggestionView {
+  id: number;
+  status: PolicySuggestionRow["status"];
+  title: string;
+  text: string;
+  question: string;
+  decidedBy: string | null;
+  updatedAt: string;
+}
+
+export function financeSuggestions(db: DatabaseSync, actorId: unknown): SuggestionView[] {
+  const rows = listSuggestions(db, actorId);
+  const tripOf = db.prepare("SELECT destination, event FROM trips WHERE id = ?");
+  const nameOf = db.prepare("SELECT name FROM roles_and_users WHERE id = ?");
+  return rows.map((s) => {
+    const trip = (tripOf.get(s.trip_id) as { destination: string | null; event: string | null } | undefined) ?? { destination: null, event: null };
+    const where = trip.destination ? `a ${trip.destination}${trip.event ? ` (${trip.event})` : ""}` : s.trip_id;
+    const place = trip.destination ? ` a ${trip.destination}` : "";
+    const nth = ORDINAL[s.exceptions] ?? `${s.exceptions}ª`;
+    const limit = LIMIT_OF[s.category] ?? s.category;
+    return {
+      id: s.id,
+      status: s.status,
+      title: `Limite ${limit}${place}`,
+      text: `${nth} deroga ${ON_CATEGORY[s.category] ?? `su ${s.category}`} approvata per la trasferta ${where} negli ultimi ${s.window_days} giorni. In media le richieste superano il limite di ${formatEuro(s.avg_extra_cents)}.`,
+      question: `Vuoi alzare di ${formatEuro(s.increase_cents)} il limite ${limit}${place} per questo periodo?`,
+      decidedBy: s.decided_by ? ((nameOf.get(s.decided_by) as { name: string } | undefined)?.name ?? null) : null,
+      updatedAt: s.updated_at,
+    };
+  });
 }

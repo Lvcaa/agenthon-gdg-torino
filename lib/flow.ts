@@ -67,6 +67,7 @@ export interface RequestRow {
   policy_version: string;
   clause_id: string;
   reason: string;
+  justification: string | null;
   funding: Funding | null;
   created_at: string;
   updated_at: string;
@@ -357,10 +358,21 @@ function blockedText(authorizedCents: number): string {
 
 // 1. Il dipendente conferma la proposta dell'agente. Il server la rilegge dalla chat, la riverifica sulla
 // policy corrente e ricalcola tutto: il client manda solo l'id del messaggio.
+export const JUSTIFICATION_MIN = 10;
+export const JUSTIFICATION_MAX = 500;
+
+// Motivazione della deroga: obbligatoria quando si supera il budget, testo libero entro i limiti.
+function parseJustification(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length >= JUSTIFICATION_MIN && text.length <= JUSTIFICATION_MAX ? text : null;
+}
+
 export function confirmProposal(
   db: DatabaseSync,
   actorId: unknown,
   messageId: unknown,
+  justification?: unknown,
   now: Date = new Date(),
 ): { request: RequestRow; duplicate: boolean } {
   const actor = getActor(db, actorId, "employee");
@@ -383,16 +395,20 @@ export function confirmProposal(
     }
     const proposal = check.proposal;
     const { budget, extra, priority } = assessProposal(db, actor.id, proposal);
+    const why = extra > 0 ? parseJustification(justification) : null;
+    if (extra > 0 && !why) {
+      throw new FlowError(400, `Stai chiedendo una deroga di ${formatEuro(extra)}: spiega perché ti serve (da ${JUSTIFICATION_MIN} a ${JUSTIFICATION_MAX} caratteri)`);
+    }
 
     const id = randomUUID();
     db.prepare(
       `INSERT INTO requests (id, trip_id, user_id, category, amount_cents, budget_cents, extra_cents,
-         priority, priority_rule, urgency, clause_quote, policy_gap, policy_version, clause_id, reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         priority, priority_rule, urgency, clause_quote, policy_gap, policy_version, clause_id, reason, justification)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id, DEMO_TRIP_ID, actor.id, proposal.category, proposal.amountCents, budget, extra,
       priority.level, priority.rule, proposal.urgency, proposal.clauseQuote, proposal.policyGap ? 1 : 0,
-      proposal.policyVersion, proposal.clauseRef, proposal.reason,
+      proposal.policyVersion, proposal.clauseRef, proposal.reason, why,
     );
     logEvent(db, id, actor.id, "request_submitted", {
       category: proposal.category,
@@ -402,6 +418,7 @@ export function confirmProposal(
       priority: priority.level,
       clauseRef: proposal.clauseRef,
       policyGap: proposal.policyGap,
+      justification: why,
     });
     db.prepare("UPDATE chat_messages SET request_id = ? WHERE id = ?").run(id, messageId as number);
 
@@ -425,7 +442,7 @@ export function confirmProposal(
         say(
           db,
           managerId,
-          `Nuova richiesta di ${actor.name} · priorità ${priority.label}: ${formatEuro(proposal.amountCents)} (${proposal.category}), extra ${formatEuro(extra)}.${proposal.policyGap ? " La policy non copre chiaramente il caso." : ""}`,
+          `Nuova richiesta di ${actor.name} · priorità ${priority.label}: ${formatEuro(proposal.amountCents)} (${proposal.category}), extra ${formatEuro(extra)}. Motivazione: «${why}».${proposal.policyGap ? " La policy non copre chiaramente il caso." : ""}`,
           id,
         );
       }
@@ -597,6 +614,8 @@ export async function payWithCard(
     if (transactionOf(db, row.id)) throw new FlowError(409, "La carta è già stata usata");
     const amount = amountCents ?? card.limit_cents;
     if (!Number.isInteger(amount) || amount <= 0) throw new FlowError(400, "Importo non valido");
+    // Il tetto lo applica anche il provider, ma un importo più alto non deve nemmeno partire.
+    if (amount > card.limit_cents) throw new FlowError(409, `Non puoi pagare più del tetto di ${formatEuro(card.limit_cents)}`);
     return { row, card, amount };
   });
   const { row, card, amount } = prep;
@@ -770,8 +789,10 @@ function attachDocumentTx(db: DatabaseSync, actor: Actor, requestId: unknown, in
     const capped = outcome === "capped" ? ` L'eccedenza di ${formatEuro(spent - authorized)} resta a tuo carico.` : "";
     say(db, actor.id, `Documenti verificati: ${checks.length} controlli superati. Rimborso approvato in automatico.${refund}${capped}`, row.id);
     for (const financeId of usersWith(db, "finance")) {
-      say(db, financeId, `Pratica di ${actor.name} approvata in automatico: documento ${formatEuro(spent)}, autorizzato ${formatEuro(authorized)}. CSV disponibile.`, row.id);
+      const why = row.justification ? ` Deroga motivata: «${row.justification}».` : "";
+      say(db, financeId, `Pratica di ${actor.name} approvata in automatico: documento ${formatEuro(spent)}, autorizzato ${formatEuro(authorized)}.${why} CSV disponibile.`, row.id);
     }
+    suggestPolicyChange(db, row);
   } else {
     setStatus(db, row.id, "in_review");
     const reasons = failed.map((c) => c.detail).join("; ");
@@ -785,6 +806,90 @@ function attachDocumentTx(db: DatabaseSync, actor: Actor, requestId: unknown, in
     }
   }
   return getRequest(db, row.id);
+}
+
+// --- Suggerimenti di policy per Finance ---
+// Quando l'agente approva in automatico una pratica nata da una deroga, si contano le deroghe approvate sulla
+// stessa categoria e trasferta negli ultimi SUGGESTION_WINDOW_DAYS giorni. Da SUGGESTION_THRESHOLD in su nasce
+// (o si aggiorna) un suggerimento: alzare il limite della deroga media, arrotondata per eccesso a 10 €.
+// È solo una proposta: la policy cambia quando Finance carica il nuovo PDF.
+export const SUGGESTION_THRESHOLD = 3;
+export const SUGGESTION_WINDOW_DAYS = 30;
+
+export interface PolicySuggestionRow {
+  id: number;
+  trip_id: string;
+  category: Category;
+  exceptions: number;
+  avg_extra_cents: number;
+  increase_cents: number;
+  window_days: number;
+  status: "open" | "accepted" | "dismissed";
+  decided_by: string | null;
+  decided_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function suggestPolicyChange(db: DatabaseSync, row: RequestRow, now = new Date()) {
+  if (row.extra_cents <= 0) return;
+  const since = new Date(now.getTime() - SUGGESTION_WINDOW_DAYS * DAY_MS).toISOString();
+  // Deroghe approvate dal manager, con documenti verificati e approvati in automatico, nella finestra.
+  const stats = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(AVG(r.extra_cents), 0) AS avg_extra, COALESCE(MAX(r.extra_cents), 0) AS max_extra
+       FROM requests r
+       JOIN approvals m ON m.request_id = r.id AND m.kind = 'manager' AND m.decision = 'approved'
+       JOIN approvals f ON f.request_id = r.id AND f.kind = 'finance' AND f.channel = 'agent'
+       WHERE r.trip_id = ? AND r.category = ? AND r.extra_cents > 0 AND f.decided_at >= ?`,
+    )
+    .get(row.trip_id, row.category, since) as { n: number; avg_extra: number; max_extra: number };
+  if (stats.n < SUGGESTION_THRESHOLD) return;
+
+  const existing = db.prepare("SELECT * FROM policy_suggestions WHERE trip_id = ? AND category = ?").get(row.trip_id, row.category) as
+    | PolicySuggestionRow
+    | undefined;
+  if (existing && existing.status !== "open") return; // Finance ha già deciso: non si ripropone
+  const increase = Math.ceil(stats.avg_extra / 1000) * 1000;
+  const avg = Math.round(stats.avg_extra);
+  if (existing) {
+    db.prepare(
+      "UPDATE policy_suggestions SET exceptions = ?, avg_extra_cents = ?, increase_cents = ?, updated_at = ? WHERE id = ?",
+    ).run(stats.n, avg, increase, nowIso(), existing.id);
+  } else {
+    db.prepare(
+      `INSERT INTO policy_suggestions (trip_id, category, exceptions, avg_extra_cents, increase_cents, window_days)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(row.trip_id, row.category, stats.n, avg, increase, SUGGESTION_WINDOW_DAYS);
+  }
+  logEvent(db, row.id, null, "policy_suggestion", { category: row.category, exceptions: stats.n, increaseCents: increase });
+}
+
+export function listSuggestions(db: DatabaseSync, actorId: unknown): PolicySuggestionRow[] {
+  getActor(db, actorId, "finance");
+  return db
+    .prepare("SELECT * FROM policy_suggestions ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, updated_at DESC")
+    .all() as unknown as PolicySuggestionRow[];
+}
+
+// Finance accetta o ignora. Una seconda decisione non cambia la prima.
+export function decideSuggestion(db: DatabaseSync, actorId: unknown, suggestionId: unknown, decision: unknown): { suggestion: PolicySuggestionRow; duplicate: boolean } {
+  const actor = getActor(db, actorId, "finance");
+  if (decision !== "accepted" && decision !== "dismissed") throw new FlowError(400, "Decisione non valida");
+  return tx(db, () => {
+    const found = db.prepare("SELECT * FROM policy_suggestions WHERE id = ?").get(Number(suggestionId)) as PolicySuggestionRow | undefined;
+    if (!found) throw new FlowError(404, "Suggerimento non trovato");
+    if (found.status !== "open") return { suggestion: found, duplicate: true };
+    db.prepare("UPDATE policy_suggestions SET status = ?, decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ?").run(
+      decision, actor.id, nowIso(), nowIso(), found.id,
+    );
+    logEvent(db, null, actor.id, decision === "accepted" ? "policy_suggestion_accepted" : "policy_suggestion_dismissed", {
+      suggestionId: found.id,
+      category: found.category,
+      increaseCents: found.increase_cents,
+    });
+    return { suggestion: db.prepare("SELECT * FROM policy_suggestions WHERE id = ?").get(found.id) as unknown as PolicySuggestionRow, duplicate: false };
+  });
 }
 
 export interface ReconCheck {
@@ -1002,6 +1107,7 @@ export function ticketData(db: DatabaseSync, actorId: unknown, requestId: unknow
       status: request.status,
       funding: request.funding,
       reason: request.reason,
+      justification: request.justification,
       policyQuote: request.clause_quote,
       policyVersion: request.policy_version,
     },
@@ -1031,7 +1137,12 @@ export function ticketData(db: DatabaseSync, actorId: unknown, requestId: unknow
       path: d.path,
       mime: d.mime,
     })),
-    verification: { outcome: receipt.outcome, receiptCents: receipt.amount_cents, reimbursedCents: receipt.reimbursed_cents },
+    verification: {
+      outcome: receipt.outcome,
+      receiptCents: receipt.amount_cents,
+      reimbursedCents: receipt.reimbursed_cents,
+      checks: checksOf(receipt.raw_json).map((c) => ({ ok: c.ok, detail: c.detail })),
+    },
     company: { ...COMPANY_BILLING },
   };
 }
@@ -1115,7 +1226,7 @@ export function exportCsv(db: DatabaseSync, actorId: unknown, requestId: unknown
       | undefined;
     if (!data) throw new FlowError(409, "Ricevuta mancante");
 
-    const header = ["request_id", "trip_id", "employee", "category", "amount_cents", "amount_eur", "receipt_id", "manager", "finance", "policy_version", "clause", "funding", "reimbursed_cents", "card_transaction_id"];
+    const header = ["request_id", "trip_id", "employee", "category", "amount_cents", "amount_eur", "receipt_id", "manager", "finance", "policy_version", "clause", "justification", "funding", "reimbursed_cents", "card_transaction_id"];
     const line = [
       row.id,
       row.trip_id,
@@ -1128,6 +1239,7 @@ export function exportCsv(db: DatabaseSync, actorId: unknown, requestId: unknown
       data.finance ?? "",
       row.policy_version,
       row.clause_id,
+      row.justification ?? "",
       row.funding ?? "",
       data.reimbursed_cents ?? "",
       data.card_transaction_id ?? "",
@@ -1183,7 +1295,7 @@ export function redeemLinkCode(db: DatabaseSync, code: unknown, chatId: unknown)
 // Riporta lo scenario ai 30 € residui. Mantiene utenti e collegamenti Telegram.
 export function resetDemo(db: DatabaseSync) {
   tx(db, () => {
-    for (const table of ["events", "card_transactions", "documents", "cards", "receipts", "approvals", "requests", "chat_messages", "telegram_link_codes"]) {
+    for (const table of ["policy_suggestions", "events", "card_transactions", "documents", "cards", "receipts", "approvals", "requests", "chat_messages", "telegram_link_codes"]) {
       db.exec(`DELETE FROM ${table}`);
     }
     db.prepare("UPDATE trips SET remaining_budget_cents = 3000 WHERE id = ?").run(DEMO_TRIP_ID);
