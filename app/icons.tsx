@@ -174,3 +174,10 @@ export function Logo({ size = 28, title }: { size?: number; title?: string }) {
     </svg>
   );
 }
+
+export const IconSearch = (p: P) => (
+  <Icon {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </Icon>
+);
