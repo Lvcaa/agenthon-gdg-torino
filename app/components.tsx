@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { CategoryIcon, IconAlert, IconCheck, IconDownload, IconFile, IconReceipt, IconReset, IconTelegram, IconUpload } from "./icons";
 
 type Json = Record<string, unknown>;
 
@@ -92,7 +93,7 @@ export interface MessageData {
   card: CardData | null;
 }
 
-function ActionButton(props: { label: string; url: string; body: Json; kind?: "danger" }) {
+function ActionButton(props: { label: string; url: string; body: Json; kind?: "danger" | "primary" | "success"; icon?: ReactNode }) {
   const router = useRouter();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -109,6 +110,7 @@ function ActionButton(props: { label: string; url: string; body: Json; kind?: "d
   return (
     <span className="action">
       <button className={props.kind} disabled={busy} onClick={run}>
+        {props.icon}
         {props.label}
       </button>
       {message && <span className="error">{message}</span>}
@@ -139,7 +141,10 @@ function CsvButton({ requestId, actorId }: { requestId: string; actorId: string 
 
   return (
     <span className="action">
-      <button onClick={download}>Scarica CSV</button>
+      <button onClick={download}>
+        <IconDownload size={15} />
+        Scarica CSV
+      </button>
       {message && <span className="error">{message}</span>}
     </span>
   );
@@ -172,16 +177,20 @@ function InvoicePopup({ requestId, billing, note }: { requestId: string; billing
         <p>
           Per questa spesa chiedi la fattura intestata all&apos;azienda{note ? `. ${note}` : "."}
         </p>
-        <div className="card">
-          <strong>{billing.name}</strong>
-          <div>P.IVA {billing.vatNumber}</div>
-          <div>Codice SDI {billing.sdiCode}</div>
-          <div>PEC {billing.pec}</div>
-        </div>
-        <p>
-          Se non carichi ricevuta, scontrino e fattura, la funzione carta potrebbe esserti disabilitata in futuro.
-        </p>
-        <button onClick={close}>Ho capito</button>
+        <dl className="billing">
+          <dt>Ragione sociale</dt>
+          <dd>{billing.name}</dd>
+          <dt>P.IVA</dt>
+          <dd>{billing.vatNumber}</dd>
+          <dt>Codice SDI</dt>
+          <dd>{billing.sdiCode}</dd>
+          <dt>PEC</dt>
+          <dd>{billing.pec}</dd>
+        </dl>
+        <p className="muted small">Se non carichi ricevuta, scontrino e fattura, la funzione carta potrebbe esserti disabilitata in futuro.</p>
+        <button className="primary" onClick={close}>
+          Ho capito
+        </button>
       </div>
     </div>
   );
@@ -209,12 +218,12 @@ function PayForm({ data, actorId }: { data: CardPanelData; actorId: string }) {
   }
 
   return (
-    <div className="action">
-      <label>
-        Importo €{" "}
-        <input className="amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy} />
+    <div className="pay-row">
+      <label className="money">
+        <span>€</span>
+        <input className="amount-input" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy} aria-label="Importo" />
       </label>
-      <button disabled={busy} onClick={pay}>
+      <button className="primary" disabled={busy} onClick={pay}>
         Paga con la carta (sandbox)
       </button>
       {message && <span className="error">{message}</span>}
@@ -249,9 +258,12 @@ function UploadForm({ requestId, kind, label, actorId }: { requestId: string; ki
 
   return (
     <div className="upload-row">
-      <span>Carica {label}</span>{" "}
-      <input type="file" accept="image/*,application/pdf" disabled={busy} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-      <button disabled={busy || !file} onClick={upload}>
+      <label className="file-pick">
+        <IconUpload size={15} />
+        <span>{file ? file.name : `Scegli ${label.toLowerCase()}`}</span>
+        <input type="file" accept="image/*,application/pdf" hidden disabled={busy} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      </label>
+      <button className="primary" disabled={busy || !file} onClick={upload}>
         {busy ? "Lettura in corso…" : "Carica"}
       </button>
       {message && <div className="error">{message}</div>}
@@ -259,87 +271,149 @@ function UploadForm({ requestId, kind, label, actorId }: { requestId: string; ki
   );
 }
 
+// Carta della pratica: virtuale (monouso) oppure personale con rimborso. Mostra documenti, pagamento e caricamento.
 function CardPanel({ data, actorId, permission }: { data: CardPanelData; actorId: string; permission: string }) {
   const employee = permission === "employee";
   const personal = data.funding === "personal";
   return (
-    <div className="card">
-      {personal ? (
-        <>
-          <strong>Carta personale · {data.category}</strong>
-          <div>
-            Paga con la tua carta fino a <strong>{data.limit}</strong>, carica lo scontrino: rimborso a fine mese.
+    <div className="doc">
+      <div className="doc-head">
+        {personal ? (
+          <div className="title">
+            <strong>Carta personale · {data.category}</strong>
+            <span>
+              Paga con la tua carta fino a {data.limit} e carica lo scontrino: rimborso a fine mese.
+              {data.stateReason ? ` ${data.stateReason}` : ""}
+            </span>
           </div>
-          {data.stateReason && <div className="muted">{data.stateReason}</div>}
-        </>
-      ) : (
-        <>
-          <strong>
-            Carta virtuale •••• {data.last4 ?? "----"} · {data.category}
-          </strong>{" "}
-          <span className="tag">monouso</span>
-          <div className="muted">
-            Tetto {data.limit} · {data.stateLabel}
-            {data.stateReason ? `: ${data.stateReason}` : ""}
-          </div>
-          {data.transaction && (
-            <div>
-              Pagato {data.transaction.amount} a {data.transaction.merchant}
+        ) : (
+          <>
+            <div className="mini-card" aria-hidden="true">
+              <span>•••• {data.last4 ?? "----"}</span>
             </div>
-          )}
-        </>
-      )}
-      <div>
-        {data.docs.map((d) => (
-          <div key={d.kind} className={d.present ? "ok" : "muted"}>
-            {d.present ? "✓" : "○"} {d.label}
-          </div>
-        ))}
+            <div className="title">
+              <strong>
+                Carta virtuale · {data.category} <span className="tag">monouso</span>
+              </strong>
+              <span>
+                Tetto {data.limit} · {data.stateLabel}
+                {data.stateReason ? `: ${data.stateReason}` : ""}
+              </span>
+            </div>
+          </>
+        )}
       </div>
-      {!data.billing && !personal && data.canPay && (
-        <div className="notice">Conserva lo scontrino/la ricevuta: dovrai caricarlo.</div>
+      {data.transaction && (
+        <dl className="ledger">
+          <div className="key">
+            <dt>Pagato a {data.transaction.merchant}</dt>
+            <dd>{data.transaction.amount}</dd>
+          </div>
+        </dl>
       )}
+      <ul className="checklist">
+        {data.docs.map((d) => (
+          <li key={d.kind} className={d.present ? "done" : undefined}>
+            {d.present ? <IconCheck size={14} /> : <span className="dot" />} {d.label}
+          </li>
+        ))}
+      </ul>
+      {!data.billing && !personal && data.canPay && <div className="notice">Conserva lo scontrino o la ricevuta: dovrai caricarlo.</div>}
       {data.billing && (
         <div className="notice">
-          Fattura intestata a {data.billing.name} · P.IVA {data.billing.vatNumber} · SDI {data.billing.sdiCode} · PEC {data.billing.pec}
-          {data.invoiceNote && <div className="muted">{data.invoiceNote}</div>}
+          <span>
+            Fattura intestata a {data.billing.name} · P.IVA {data.billing.vatNumber} · SDI {data.billing.sdiCode} · PEC {data.billing.pec}
+            {data.invoiceNote && <span className="block">{data.invoiceNote}</span>}
+          </span>
         </div>
       )}
-      {employee && data.canPay && <PayForm data={data} actorId={actorId} />}
-      {employee &&
-        data.canUpload &&
-        data.docs
-          .filter((d) => !d.present)
-          .map((d) => <UploadForm key={d.kind} requestId={data.requestId} kind={d.kind} label={d.label} actorId={actorId} />)}
+      {employee && (data.canPay || data.canUpload) && (
+        <div className="doc-foot stack">
+          {data.canPay && <PayForm data={data} actorId={actorId} />}
+          {data.canUpload &&
+            data.docs
+              .filter((d) => !d.present)
+              .map((d) => <UploadForm key={d.kind} requestId={data.requestId} kind={d.kind} label={d.label} actorId={actorId} />)}
+        </div>
+      )}
       {employee && data.popup && data.billing && <InvoicePopup requestId={data.requestId} billing={data.billing} note={data.invoiceNote} />}
     </div>
   );
 }
 
-function Quote({ text }: { text: string | null }) {
-  return text ? <blockquote>{text}</blockquote> : null;
+function Clause({ clause, text }: { clause: string; text: string | null }) {
+  return (
+    <div className="clause">
+      <div className="clause-ref">Policy · {clause}</div>
+      {text && <blockquote>{text}</blockquote>}
+    </div>
+  );
+}
+
+const initials = (name: string) =>
+  name
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+// Righe contabili: etichetta a sinistra, cifra allineata a destra. "key" evidenzia la cifra che conta.
+function Ledger({ rows }: { rows: { label: string; value: string; key?: boolean }[] }) {
+  return (
+    <dl className="ledger">
+      {rows.map((r) => (
+        <div key={r.label} className={r.key ? "key" : undefined}>
+          <dt>{r.label}</dt>
+          <dd>{r.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 function Card({ card, actorId, permission }: { card: CardData; actorId: string; permission: string }) {
   if (card.type === "proposal") {
     return (
-      <div className="card">
-        <strong>
-          {card.category} · {card.amount}
-        </strong>{" "}
-        <span className={`tag p${card.priority}`}>{card.priorityLabel}</span>
-        <div className="muted">
-          {card.limit ? `limite ${card.limit}` : "limite non definito dalla policy"} · residuo {card.budget} · extra{" "}
-          <strong>{card.extra}</strong>
+      <div className="doc">
+        <div className="doc-head">
+          <div className="title">
+            <strong>
+              <CategoryIcon label={card.category} size={16} />
+              {card.category}
+            </strong>
+            <span>Proposta da confermare</span>
+          </div>
+          <div className="right">
+            <span className={`tag p${card.priority}`}>{card.priorityLabel}</span>
+            <span className="amount">{card.amount}</span>
+          </div>
         </div>
-        <div className="muted">{card.clause}</div>
-        <Quote text={card.quote} />
-        {card.policyGap && <div className="notice">Policy non chiara su questo caso: deciderà il manager.</div>}
-        {card.confirmedStatus ? (
-          <div className="muted">Inviata · {card.confirmedStatus}</div>
-        ) : (
-          <ActionButton label="Conferma invio" url="/api/chat/confirm" body={{ actorId, messageId: card.messageId }} />
+        <Ledger
+          rows={[
+            { label: "Limite policy", value: card.limit ?? "non definito" },
+            { label: "Budget residuo", value: card.budget },
+            { label: "Deroga richiesta", value: card.extra, key: true },
+          ]}
+        />
+        <Clause clause={card.clause} text={card.quote} />
+        {card.policyGap && (
+          <div className="notice">
+            <IconAlert size={15} /> La policy non copre questo caso: decide il manager.
+          </div>
         )}
+        <div className="doc-foot">
+          {card.confirmedStatus ? (
+            <span className="ok">
+              <IconCheck size={15} /> Inviata · {card.confirmedStatus}
+            </span>
+          ) : (
+            <>
+              <span className="muted small">Parte solo quando confermi.</span>
+              <ActionButton label="Conferma" kind="primary" url="/api/chat/confirm" body={{ actorId, messageId: card.messageId }} />
+            </>
+          )}
+        </div>
       </div>
     );
   }
@@ -352,44 +426,67 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
     return (
       <div className="cards">
         {card.items.map((r) => (
-          <div className="card" key={r.id}>
-            <strong>
-              {r.employee} · {r.category} · {r.amount}
-            </strong>{" "}
-            <span className={`tag p${r.priority}`}>{r.priorityLabel}</span>
-            <div className="muted">
-              budget {r.budget} · extra {r.extra} · {r.clause}
+          <div className="doc" key={r.id}>
+            <div className="doc-head">
+              <span className="avatar">{initials(r.employee)}</span>
+              <div className="title">
+                <strong>{r.employee}</strong>
+                <span>
+                  {r.category} · {r.employeeRole}
+                </span>
+              </div>
+              <div className="right">
+                <span className={`tag p${r.priority}`}>{r.priorityLabel}</span>
+                <span className="amount">{r.amount}</span>
+              </div>
             </div>
-            <Quote text={r.quote} />
-            {r.policyGap && <div className="notice">Policy non chiara su questo caso.</div>}
-            <div>{r.statusLabel}</div>
-            {r.funding && <div className="muted">Pagamento: {r.funding}</div>}
-            {r.verification && <div className="muted">Verifica: {r.verification}</div>}
-            {permission === "employee" && r.card && r.awaitingDocs && <CardPanel data={r.card} actorId={actorId} permission={permission} />}
-            <div>
-              {permission === "manager" && r.status === "pending_manager" && (
-                <>
-                  <ActionButton label="Approva" url={`/api/requests/${r.id}/decision`} body={{ actorId, decision: "approved" }} />
-                  <ActionButton label="Rifiuta" kind="danger" url={`/api/requests/${r.id}/decision`} body={{ actorId, decision: "rejected" }} />
-                </>
-              )}
-              {permission === "employee" && r.awaitingDocs && (
-                <>
-                  <ActionButton label={`Ricevuta ${r.authorized}`} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "exact" }} />
-                  <ActionButton label={`Ricevuta ${r.overAuthorized}`} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "over" }} />
-                </>
-              )}
-              {permission === "finance" && r.status === "pending_finance" && (
-                <ActionButton label="Approva rimborso" url={`/api/requests/${r.id}/finance`} body={{ actorId }} />
-              )}
-              {permission === "finance" && ["pending_finance", "finance_approved", "exported"].includes(r.status) && (
-                <CsvButton requestId={r.id} actorId={actorId} />
-              )}
-              {permission === "finance" && r.verification && (
-                <a className="action" href={`/api/requests/${r.id}/ticket?actorId=${encodeURIComponent(actorId)}`} target="_blank" rel="noreferrer">
-                  <button type="button">Ticket PDF</button>
-                </a>
-              )}
+            <Ledger
+              rows={[
+                { label: "Budget residuo", value: r.budget },
+                { label: "Deroga", value: r.extra, key: true },
+                { label: "Autorizzato", value: r.authorized },
+                ...(r.funding ? [{ label: "Pagamento", value: r.funding }] : []),
+                ...(r.verification ? [{ label: "Verifica documenti", value: r.verification }] : []),
+              ]}
+            />
+            <Clause clause={r.clause} text={r.quote} />
+            {r.policyGap && (
+              <div className="notice">
+                <IconAlert size={15} /> La policy non copre questo caso.
+              </div>
+            )}
+            {permission === "employee" && r.card && r.awaitingDocs && (
+              <div className="nested">
+                <CardPanel data={r.card} actorId={actorId} permission={permission} />
+              </div>
+            )}
+            <div className="doc-foot">
+              <span className={`tag status status-${r.status}`}>{r.statusLabel}</span>
+              <div className="actions">
+                {permission === "manager" && r.status === "pending_manager" && (
+                  <>
+                    <ActionButton label="Rifiuta" kind="danger" url={`/api/requests/${r.id}/decision`} body={{ actorId, decision: "rejected" }} />
+                    <ActionButton label={`Approva ${r.extra}`} kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${r.id}/decision`} body={{ actorId, decision: "approved" }} />
+                  </>
+                )}
+                {permission === "employee" && r.awaitingDocs && (
+                  <>
+                    <ActionButton label={`Ricevuta ${r.overAuthorized}`} icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "over" }} />
+                    <ActionButton label={`Ricevuta ${r.authorized}`} kind="primary" icon={<IconReceipt size={15} />} url={`/api/requests/${r.id}/receipt`} body={{ actorId, kind: "exact" }} />
+                  </>
+                )}
+                {permission === "finance" && ["pending_finance", "finance_approved", "exported"].includes(r.status) && (
+                  <CsvButton requestId={r.id} actorId={actorId} />
+                )}
+                {permission === "finance" && r.verification && (
+                  <a className="btn-link" href={`/api/requests/${r.id}/ticket?actorId=${encodeURIComponent(actorId)}`} target="_blank" rel="noreferrer">
+                    <IconFile size={15} /> Ticket PDF
+                  </a>
+                )}
+                {permission === "finance" && r.status === "pending_finance" && (
+                  <ActionButton label="Approva rimborso" kind="success" icon={<IconCheck size={15} />} url={`/api/requests/${r.id}/finance`} body={{ actorId }} />
+                )}
+              </div>
             </div>
           </div>
         ))}
@@ -399,23 +496,60 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
 
   if (card.type === "events") {
     return (
-      <div className="card">
-        {card.items.length === 0 && <span className="muted">Nessun evento.</span>}
-        {card.items.map((e) => (
-          <div key={e.id} className="event">
-            <span className="muted">{e.time}</span> <strong>{e.type}</strong> · {e.actor}
-            {e.request && <span className="muted"> · {e.request}</span>}
-            {e.details && <div className="muted">{e.details}</div>}
+      <div className="doc">
+        <div className="doc-head">
+          <div className="title">
+            <strong>Registro decisioni</strong>
+            <span>Ogni passaggio, chi l&apos;ha fatto e quando. Non modificabile.</span>
           </div>
-        ))}
+        </div>
+        {card.items.length === 0 ? (
+          <div className="clause muted">Nessun evento.</div>
+        ) : (
+          <table className="log">
+            <thead>
+              <tr>
+                <th>Ora</th>
+                <th>Evento</th>
+                <th>Chi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {card.items.map((e) => (
+                <tr key={e.id}>
+                  <td>{e.time}</td>
+                  <td>
+                    <span className="ev">{e.type}</span>
+                    {e.request && <span className="muted mono"> #{e.request}</span>}
+                    {e.details && <div className="details">{e.details}</div>}
+                  </td>
+                  <td>{e.actor}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     );
   }
 
   if (card.type === "policy") {
     return (
-      <div className="card">
-        <strong>{card.filename}</strong> · versione {card.version} · {card.pages} pagine {card.active ? "· attiva" : "· non più attiva"}
+      <div className="doc">
+        <div className="doc-head">
+          <div className="title">
+            <strong>
+              <IconFile size={16} />
+              {card.filename}
+            </strong>
+            <span>
+              versione <span className="mono">{card.version}</span> · {card.pages} pagine
+            </span>
+          </div>
+          <div className="right">
+            <span className={`tag status ${card.active ? "status-done" : ""}`}>{card.active ? "Attiva" : "Non più attiva"}</span>
+          </div>
+        </div>
         <ol className="sections">
           {card.sections.map((s, i) => (
             <li key={i}>
@@ -428,12 +562,51 @@ function Card({ card, actorId, permission }: { card: CardData; actorId: string; 
   }
 
   return (
-    <div className="card">
-      Codice per il bot Telegram: <strong className="code">{card.code}</strong>
-      <div className="muted">Valido fino alle {new Date(card.expiresAt).toLocaleTimeString("it-IT")}. Mandalo al bot.</div>
+    <div className="doc">
+      <div className="doc-head">
+        <div className="title">
+          <strong>
+            <IconTelegram size={16} />
+            Collega Telegram
+          </strong>
+          <span>Manda questo codice al bot. Scade alle {new Date(card.expiresAt).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}.</span>
+        </div>
+      </div>
+      <div className="code" aria-label={card.code}>
+        {card.code.split("").map((c, i) => (
+          <span key={i}>{c}</span>
+        ))}
+      </div>
     </div>
   );
 }
+
+const SUGGESTIONS: Record<string, string[]> = {
+  employee: ["L'hotel per la fiera costa 130 €. Rientra nel mio budget?", "Quanto posso spendere per la cena stasera?", "Mostrami le mie richieste"],
+  manager: ["Cosa ho in coda?", "Mostrami il registro delle decisioni", "Collega Telegram"],
+  finance: ["Cosa c'è da approvare?", "Mostrami la policy attiva", "Mostrami il registro delle decisioni"],
+};
+
+const COMPOSER: Record<string, string> = {
+  employee: "Es. hotel per la fiera, 130 €",
+  manager: "Es. cosa ho in coda?",
+  finance: "Es. cosa c'è da approvare?",
+};
+
+const INTRO: Record<string, { title: string; text: string }> = {
+  employee: {
+    title: "Cosa devi pagare?",
+    text: "Scrivi la spesa e quanto costa, anche al volo. Ti rispondo con il tuo limite e la clausola della policy, e se sfori preparo io la richiesta per il manager.",
+  },
+  manager: {
+    title: "Per ora non c'è niente da decidere.",
+    text: "Qui compaiono solo le spese fuori policy, con importo, motivo e clausola. Quelle dentro il limite le autorizzo io.",
+  },
+  finance: {
+    title: "Nessuna pratica in coda.",
+    text: "Quando una ricevuta torna con l'importo autorizzato, la pratica arriva qui. La approvi e scarichi il CSV per il gestionale.",
+  },
+};
 
 export function Chat(props: { actorId: string; permission: string; messages: MessageData[]; placeholder: string; pending?: CardPanelData[] }) {
   const router = useRouter();
@@ -467,31 +640,70 @@ export function Chat(props: { actorId: string; permission: string; messages: Mes
 
   return (
     <div className="chat">
-      <div className="messages">
+      <div className="messages" aria-live="polite">
         {props.pending?.map((p) => (
-          <div key={p.requestId} className="bubble assistant">
-            <div className="text">Documenti da caricare per la tua pratica.</div>
-            <CardPanel data={p} actorId={props.actorId} permission={props.permission} />
+          <div key={p.requestId} className="msg assistant">
+            <div className="msg-body">
+              <div className="who-line">Assistente</div>
+              <div className="bubble">
+                <div className="text">Documenti da caricare per la tua pratica.</div>
+              </div>
+              <CardPanel data={p} actorId={props.actorId} permission={props.permission} />
+            </div>
           </div>
         ))}
-        {props.messages.length === 0 && <p className="muted">{props.placeholder}</p>}
+        {props.messages.length === 0 && !props.pending?.length && (
+          <div className="empty">
+            <h2>{INTRO[props.permission]?.title}</h2>
+            <p>{INTRO[props.permission]?.text}</p>
+            <div className="suggestions">
+              {(SUGGESTIONS[props.permission] ?? []).map((q) => (
+                <button key={q} type="button" onClick={() => setText(q)}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {props.messages.map((m) => (
-          <div key={m.id} className={`bubble ${m.role}`}>
-            <div className="text">{m.content}</div>
-            {m.card && <Card card={m.card} actorId={props.actorId} permission={props.permission} />}
-            <div className="time">{m.time}</div>
+          <div key={m.id} className={`msg ${m.role}`}>
+            <div className="msg-body">
+              {m.role === "assistant" && (
+                <div className="who-line">
+                  Assistente <span className="time">{m.time}</span>
+                </div>
+              )}
+              <div className="bubble">
+                <div className="text">{m.content}</div>
+              </div>
+              {m.card && <Card card={m.card} actorId={props.actorId} permission={props.permission} />}
+              {m.role === "user" && <div className="time">{m.time}</div>}
+            </div>
           </div>
         ))}
-        {pending && <div className="bubble assistant muted">Sto leggendo la policy…</div>}
+        {pending && (
+          <div className="msg assistant">
+            <div className="typing">
+              <span className="dots">
+                <i />
+                <i />
+                <i />
+              </span>
+              Leggo la policy…
+            </div>
+          </div>
+        )}
         <div ref={bottom} />
       </div>
       {error && <div className="error">{error}</div>}
-      <form onSubmit={send} className="composer">
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Scrivi un messaggio" maxLength={1000} autoFocus />
-        <button type="submit" disabled={pending}>
-          Invia
-        </button>
-      </form>
+      <div className="composer-wrap">
+        <form onSubmit={send} className="composer">
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder={COMPOSER[props.permission] ?? "Scrivi un messaggio…"} maxLength={1000} autoFocus aria-label="Messaggio" />
+          <button type="submit" className="primary" disabled={pending || !text.trim()}>
+            Invia
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
@@ -500,13 +712,14 @@ export function ResetButton(): ReactNode {
   const router = useRouter();
   return (
     <button
-      className="danger"
+      className="ghost"
       onClick={async () => {
         await post("/api/demo/reset", {});
         router.refresh();
       }}
     >
-      Reset demo
+      <IconReset size={15} />
+      Ricomincia la demo
     </button>
   );
 }
@@ -533,8 +746,11 @@ export function PolicyUpload({ actorId }: { actorId: string }) {
   return (
     <div className="upload">
       <label className={`dropzone${busy ? " busy" : ""}`}>
-        {busy ? "Sto leggendo il PDF…" : "Carica la policy in PDF"}
-        <span className="muted small">Testo selezionabile, massimo 5 MB e 100 pagine</span>
+        <span className="row">
+          <IconUpload size={16} />
+          {busy ? "Leggo il PDF…" : "Carica una nuova policy"}
+        </span>
+        <span className="muted small">PDF con testo selezionabile · max 5 MB, 100 pagine</span>
         <input type="file" accept="application/pdf" hidden disabled={busy} onChange={(e) => upload(e.target.files?.[0])} />
       </label>
       {message && <div className={message.startsWith("Caricata") ? "ok" : "error"}>{message}</div>}
